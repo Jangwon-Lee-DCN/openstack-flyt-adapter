@@ -1,6 +1,7 @@
 {{- if .Values.clusterManager.enabled }}
-{{- if eq .Values.clusterManager.service.type "ClusterIP" }}{{ fail "clusterManager.service.type must expose the manager to the dedicated FLYT network" }}{{ end }}
+{{- if and (eq .Values.clusterManager.service.type "ClusterIP") (not .Values.rackGateway.enabled) }}{{ fail "ClusterIP manager service requires rackGateway.enabled" }}{{ end }}
 {{- if not .Values.clusterManager.clientCidrs }}{{ fail "clusterManager.clientCidrs is required" }}{{ end }}
+{{- if not .Values.clusterManager.nodeCidrs }}{{ fail "clusterManager.nodeCidrs is required" }}{{ end }}
 apiVersion: v1
 kind: Service
 metadata:
@@ -13,6 +14,10 @@ spec:
   type: {{ .Values.clusterManager.service.type }}
   {{- with .Values.clusterManager.service.loadBalancerIP }}
   loadBalancerIP: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.clusterManager.service.externalIPs }}
+  externalIPs:
+    {{- toYaml . | nindent 4 }}
   {{- end }}
   selector:
     app.kubernetes.io/name: {{ include "flyt-adapter.name" . }}

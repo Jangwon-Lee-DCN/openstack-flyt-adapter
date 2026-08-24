@@ -32,4 +32,26 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: {{ include "flyt-adapter.name" . }}-gpu-cells
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "flyt-adapter.name" . }}-dra-discovery
+rules:
+- apiGroups: ["resource.k8s.io"]
+  resources: ["deviceclasses", "resourceslices"]
+  verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "flyt-adapter.name" . }}-dra-discovery
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "flyt-adapter.name" . }}-dra-discovery
+subjects:
+- kind: ServiceAccount
+  name: {{ .Values.gpuCells.serviceAccountName }}
+  namespace: {{ .Release.Namespace }}
 {{- end }}

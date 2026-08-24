@@ -58,6 +58,7 @@ class NeutronServicePortProvider:
     token: str
     transport: JsonTransport
     networks: Mapping[str, str]
+    subnets: Mapping[str, str] = field(default_factory=dict)
     security_group_ids: tuple[str, ...] = ()
 
     def ensure(self, *, instance_uuid: str, project_id: str,
@@ -68,6 +69,7 @@ class NeutronServicePortProvider:
                 raise OpenStackError("managed Neutron port identity mismatch")
             return existing
         network_id = self._network(availability_zone)
+        subnet_id = self.subnets.get(availability_zone)
         _, response = self.transport.request(
             "POST", f"{self.endpoint.rstrip('/')}/v2.0/ports",
             headers={"X-Auth-Token": self.token},
@@ -76,9 +78,13 @@ class NeutronServicePortProvider:
                 "project_id": project_id,
                 "name": f"flyt-{instance_uuid}",
                 "admin_state_up": True,
-                "device_id": instance_uuid,
-                "device_owner": "compute:flyt",
+                # Nova only accepts an explicitly requested port while it is
+                # unbound. Nova atomically assigns device_id/device_owner when
+                # it claims the port for the pre-generated instance UUID.
+                "device_id": "",
+                "device_owner": "",
                 "security_groups": list(self.security_group_ids),
+                **({"fixed_ips": [{"subnet_id": subnet_id}]} if subnet_id else {}),
                 "tags": ["managed-by=flyt-adapter", f"instance-uuid={instance_uuid}"],
             }},
         )
@@ -101,7 +107,7 @@ class NeutronServicePortProvider:
     def get(self, instance_uuid: str) -> ManagedPort | None:
         _, response = self.transport.request(
             "GET", f"{self.endpoint.rstrip('/')}/v2.0/ports"
-            f"?device_id={quote(instance_uuid, safe='')}&device_owner=compute%3Aflyt",
+            f"?name={quote('flyt-' + instance_uuid, safe='')}",
             headers={"X-Auth-Token": self.token},
         )
         ports = response.get("ports")
@@ -118,14 +124,20 @@ class NeutronServicePortProvider:
         return self._decode(ports[0], az)
 
     def list_managed(self) -> tuple[ManagedPort, ...]:
-        _, response = self.transport.request(
-            "GET", f"{self.endpoint.rstrip('/')}/v2.0/ports"
-            "?device_owner=compute%3Aflyt&tags=managed-by%3Dflyt-adapter",
-            headers={"X-Auth-Token": self.token},
-        )
-        ports = response.get("ports")
-        if not isinstance(ports, list):
-            raise OpenStackError("Neutron ports response is malformed")
+        ports = []
+        # Some Neutron deployments accept but discard tags during port create.
+        # The UUID-derived name and dedicated network are portable API fields.
+        for network_id in set(self.networks.values()):
+            _, response = self.transport.request(
+                "GET", f"{self.endpoint.rstrip('/')}/v2.0/ports"
+                f"?network_id={quote(network_id, safe='')}",
+                headers={"X-Auth-Token": self.token},
+            )
+            items = response.get("ports")
+            if not isinstance(items, list):
+                raise OpenStackError("Neutron ports response is malformed")
+            ports.extend(port for port in items if isinstance(port, Mapping)
+                         and str(port.get("name", "")).startswith("flyt-"))
         values = []
         for port in ports:
             network_id = port.get("network_id") if isinstance(port, Mapping) else None
@@ -151,8 +163,21 @@ class NeutronServicePortProvider:
         addresses = [item.get("ip_address") for item in fixed_ips if isinstance(item, Mapping)]
         service_ip = next((item for item in addresses if isinstance(item, str) and item), None)
         try:
+            tags = value.get("tags", [])
+            instance_tag = next(
+                (tag.removeprefix("instance-uuid=") for tag in tags
+                 if isinstance(tag, str) and tag.startswith("instance-uuid=")),
+                None,
+            ) if isinstance(tags, list) else None
+            name = value.get("name")
+            name_identity = name.removeprefix("flyt-") if (
+                isinstance(name, str) and name.startswith("flyt-")
+            ) else None
+            instance_uuid = instance_tag or name_identity or value.get("device_id")
+            if not isinstance(instance_uuid, str) or not instance_uuid:
+                raise OpenStackError("managed Neutron port lacks instance identity")
             return ManagedPort(
-                instance_uuid=str(value["device_id"]), project_id=str(value["project_id"]),
+                instance_uuid=instance_uuid, project_id=str(value["project_id"]),
                 availability_zone=availability_zone, network_id=str(value["network_id"]),
                 port_id=str(value["id"]), mac_address=str(value["mac_address"]),
                 service_ip=service_ip,

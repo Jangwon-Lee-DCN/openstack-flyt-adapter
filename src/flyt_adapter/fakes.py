@@ -80,6 +80,38 @@ class FakeQuotaProvider:
 
 
 @dataclass
+class SessionQuotaProvider:
+    """Derive quota use from the shared session store across service processes."""
+
+    limits: dict[tuple[str, str], int]
+    sessions: object
+
+    def available(self, *, project_id: str, profile: str) -> bool:
+        used = sum(
+            1 for record in self.sessions.values()
+            if record.project_id == project_id and record.profile == profile and
+            record.state not in {SessionState.FAILED, SessionState.DELETED}
+        )
+        return used < self.limits.get((project_id, profile), 0)
+
+    def reserve(self, *, project_id: str, profile: str, consumer_uuid: str) -> None:
+        existing = self.sessions.get(consumer_uuid)
+        if existing is not None and existing.state not in {
+            SessionState.FAILED, SessionState.DELETED
+        }:
+            return
+        if not self.available(project_id=project_id, profile=profile):
+            raise QuotaExceededError(
+                f"project {project_id} exceeds quota for profile {profile}"
+            )
+
+    def release(self, consumer_uuid: str) -> None:
+        # The authoritative release is the FAILED/DELETED state persisted by
+        # FlytLifecycleService immediately after this callback.
+        return None
+
+
+@dataclass
 class FakeFlytBackend:
     sessions: dict[str, str] = field(default_factory=dict)
 

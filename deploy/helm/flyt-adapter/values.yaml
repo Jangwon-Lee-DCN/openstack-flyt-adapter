@@ -1,11 +1,42 @@
 replicaCount: 1
 
+rackGateway:
+  enabled: false
+  image:
+    repository: ""
+    digest: ""
+  listenIP: ""
+  nodeSelector: {}
+  packageProxy:
+    enabled: false
+    listenPort: 12403
+    backendHost: ""
+    backendPort: 443
+rackGateways: []
+
+podNetwork:
+  hostNetwork: false
+
 image:
   repository: ""
   digest: ""
   pullPolicy: IfNotPresent
 
 existingSecret: flyt-adapter
+
+clientPackageServer:
+  enabled: false
+  image:
+    repository: ""
+    digest: ""
+  servicePort: 8080
+  route:
+    enabled: false
+    hostname: ""
+    pathPrefix: /flyt-client
+    gatewayName: openstack-public-gateway
+    gatewayNamespace: openstack-gateway-system
+    sectionName: https
 
 notifications:
   enabled: false
@@ -17,11 +48,13 @@ reconciler:
 
 openstack:
   enabled: false
+  tokenGeneration: ""
   novaEndpoint: ""
   glanceEndpoint: ""
   placementEndpoint: ""
   neutronEndpoint: ""
   caFile: ""
+  caConfigMapName: ""
   tokenSecretName: flyt-adapter-openstack
   tokenSecretKey: token
   placementSync:
@@ -31,6 +64,10 @@ openstack:
 
 clusterManager:
   enabled: false
+  # Publish only the two FLYT ports on the selected node while the Pod keeps
+  # an isolated network namespace.
+  hostPorts: false
+  hostIP: ""
   image:
     repository: ""
     digest: ""
@@ -40,6 +77,7 @@ clusterManager:
   service:
     type: LoadBalancer
     loadBalancerIP: ""
+    externalIPs: []
     annotations: {}
   clientCidrs: []
   nodeCidrs: []
@@ -49,6 +87,13 @@ clusterManager:
       digest: ""
     existingSecret: flyt-mongodb
     storageSize: 1Gi
+    storageClassName: ""
+    # Exact node addresses used when the Cluster Manager runs with hostNetwork.
+    clientCidrs: []
+    # Required on Cilium when the Cluster Manager uses hostNetwork. MongoDB is
+    # still ClusterIP-only and authenticated; this permits the Cilium host
+    # identity solely on TCP/27017.
+    allowCiliumHost: false
 
 gpuCells:
   enabled: false
@@ -57,11 +102,17 @@ gpuCells:
   endpoint: https://kubernetes.default.svc
   caFile: /var/run/secrets/flyt-kubernetes/ca.crt
   tokenFile: /var/run/secrets/flyt-kubernetes/token
+  # Kubernetes API endpoint CIDRs reachable from the Adapter Pod. Required
+  # when GPU Cell orchestration is enabled so NetworkPolicy stays fail-closed.
+  apiServerCidrs: []
+  # Include both the Kubernetes Service port and the post-DNAT endpoint port.
+  apiServerPorts: [443, 6443]
   image:
     repository: ""
     digest: ""
   clusterManagerAddress: ""
   runtimeClassName: nvidia
+  hostNetwork: false
   sessionProfiles:
     flyt-nvidia-rtx3090ti-mps-shared-v1: nvidia-rtx3090ti-whole-mps
   profiles:
@@ -85,6 +136,7 @@ config:
   serviceNetwork:
     networks:
       default: fake-flyt-network
+    subnets: {}
     securityGroupIds: []
   flytManager:
     profiles:
@@ -94,6 +146,7 @@ config:
   clientPackage:
     url: ""
     digest: ""
+    resolveAddress: ""
 
 persistence:
   enabled: false

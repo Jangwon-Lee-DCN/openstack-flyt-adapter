@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 import json
 import ssl
+import time
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import quote
@@ -17,6 +18,12 @@ from .models import GpuCell, GpuCellState
 class KubernetesTransport(Protocol):
     def request(self, method: str, path: str,
                 body: dict[str, Any] | None = None) -> tuple[int, dict[str, Any]]: ...
+
+
+@dataclass(frozen=True)
+class GpuCellReadiness:
+    ready: bool
+    reason: str
 
 
 @dataclass
@@ -68,17 +75,80 @@ class KubernetesGpuCellProvider:
     profiles: dict[str, GpuCellProfile]
     transport: KubernetesTransport
     runtime_class_name: str | None = None
+    host_network: bool = False
+
+    def readiness(self, cell_profile: str) -> GpuCellReadiness:
+        try:
+            profile = self.profiles[cell_profile]
+        except KeyError:
+            return GpuCellReadiness(False, f"unknown GPU Cell profile {cell_profile}")
+        try:
+            status, _ = self.transport.request(
+                "GET", f"/apis/resource.k8s.io/v1/deviceclasses/{quote(profile.device_class)}"
+            )
+            if status != 200:
+                return GpuCellReadiness(
+                    False, f"DeviceClass {profile.device_class} is unavailable (HTTP {status})"
+                )
+            status, slices = self.transport.request(
+                "GET", "/apis/resource.k8s.io/v1/resourceslices"
+            )
+            if status != 200:
+                return GpuCellReadiness(False, f"ResourceSlice list failed (HTTP {status})")
+        except Exception as exc:
+            return GpuCellReadiness(False, f"Kubernetes DRA discovery failed: {exc}")
+        devices = [
+            device
+            for item in slices.get("items", [])
+            if item.get("spec", {}).get("driver") == profile.device_class
+            for device in item.get("spec", {}).get("devices", [])
+        ]
+        if not devices:
+            return GpuCellReadiness(False, f"no devices published by {profile.device_class}")
+        if profile.expected_product_name:
+            products = {
+                value.get("string")
+                for device in devices
+                if isinstance((attributes := device.get("attributes", {})), dict)
+                if isinstance((value := (
+                    attributes.get("productName")
+                    or attributes.get(f"{profile.device_class}/productName")
+                )), dict)
+            }
+            if profile.expected_product_name not in products:
+                return GpuCellReadiness(
+                    False, f"expected GPU product {profile.expected_product_name} is not published"
+                )
+        return GpuCellReadiness(True, "DRA device is available")
 
     def ensure(self, *, cell_profile: str) -> GpuCell:
         cell_name = _resource_name("flyt-cell", cell_profile)
         claim_name = _resource_name("flyt-gpu", cell_profile)
-        existing = self.get(cell_profile)
-        if existing:
-            return existing
         try:
             profile = self.profiles[cell_profile]
         except KeyError as exc:
             raise RuntimeError(f"unknown GPU Cell profile {cell_profile}") from exc
+        pod_path = f"{self._pods_path()}/{quote(cell_name)}"
+        status, existing_pod = self.transport.request("GET", pod_path)
+        if status == 200:
+            existing = self._cell_from_pod(cell_profile, existing_pod)
+            desired_pod = self._pod(cell_name, claim_name, cell_profile, profile)
+            if self._pod_matches(existing_pod, desired_pod):
+                return existing
+            status, _ = self.transport.request("DELETE", pod_path)
+            if status not in {200, 202, 404}:
+                raise RuntimeError(f"GPU Cell Pod replacement failed with HTTP {status}")
+            for _ in range(30):
+                status, _ = self.transport.request("GET", pod_path)
+                if status == 404:
+                    break
+                if status != 200:
+                    raise RuntimeError(f"GPU Cell replacement lookup failed with HTTP {status}")
+                time.sleep(1)
+            else:
+                raise RuntimeError("GPU Cell Pod replacement timed out")
+        elif status != 404:
+            raise RuntimeError(f"GPU Cell lookup failed with HTTP {status}")
         status, _ = self.transport.request(
             "POST", self._claims_path(), self._claim(claim_name, cell_profile, profile)
         )
@@ -103,6 +173,10 @@ class KubernetesGpuCellProvider:
             return None
         if status != 200:
             raise RuntimeError(f"GPU Cell lookup failed with HTTP {status}")
+        return self._cell_from_pod(cell_profile, pod)
+
+    def _cell_from_pod(self, cell_profile: str, pod: dict[str, Any]) -> GpuCell:
+        name = _resource_name("flyt-cell", cell_profile)
         labels = pod.get("metadata", {}).get("labels", {})
         if labels.get("flyt.runtime/cell-id") != cell_profile:
             raise RuntimeError("GPU Cell identity mismatch")
@@ -121,6 +195,22 @@ class KubernetesGpuCellProvider:
         else:
             state = GpuCellState.POD_PENDING
         return GpuCell(cell_profile, name, _resource_name("flyt-gpu", cell_profile), profile, state)
+
+    @staticmethod
+    def _pod_matches(existing: dict[str, Any], desired: dict[str, Any]) -> bool:
+        existing_spec = existing.get("spec", {})
+        desired_spec = desired["spec"]
+        existing_containers = existing_spec.get("containers", [])
+        desired_container = desired_spec["containers"][0]
+        if len(existing_containers) != 1:
+            return False
+        existing_container = existing_containers[0]
+        return (
+            existing_container.get("image") == desired_container["image"]
+            and existing_container.get("env", []) == desired_container["env"]
+            and existing_spec.get("runtimeClassName") == desired_spec.get("runtimeClassName")
+            and bool(existing_spec.get("hostNetwork")) == bool(desired_spec.get("hostNetwork"))
+        )
 
     def delete(self, cell_profile: str) -> None:
         for path in (
@@ -183,6 +273,9 @@ class KubernetesGpuCellProvider:
         }
         if self.runtime_class_name:
             spec["runtimeClassName"] = self.runtime_class_name
+        if self.host_network:
+            spec["hostNetwork"] = True
+            spec["dnsPolicy"] = "ClusterFirstWithHostNet"
         return {
             "apiVersion": "v1", "kind": "Pod",
             "metadata": {"name": name, "namespace": self.namespace, "labels": {

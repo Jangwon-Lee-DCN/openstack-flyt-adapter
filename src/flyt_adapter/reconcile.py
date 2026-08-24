@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Mapping, Protocol
+from typing import Iterable, Mapping, Protocol
 
 from .models import InstanceRequest, ManagedPort, SessionState
 from .service import AdmissionError
@@ -18,6 +18,24 @@ class NovaInstanceInventory(Protocol):
 
 class InstanceRequestFactory(Protocol):
     def instance_request(self, instance_uuid: str, port: ManagedPort) -> InstanceRequest: ...
+
+
+class GpuCellPoolProvider(Protocol):
+    def ensure(self, *, cell_profile: str): ...
+
+
+@dataclass
+class GpuCellPoolReconciler:
+    """Keep configured physical GPU Cells ready outside Nova's build path."""
+
+    provider: GpuCellPoolProvider
+    profiles: Iterable[str]
+
+    def run_once(self) -> int:
+        profiles = sorted(set(self.profiles))
+        for profile in profiles:
+            self.provider.ensure(cell_profile=profile)
+        return len(profiles)
 
 
 @dataclass(frozen=True)
@@ -46,7 +64,8 @@ class SessionReconciler:
                 self.lifecycle.delete_instance(record.instance_uuid)
                 deleted += 1
             elif status == "ACTIVE" and record.state in {
-                SessionState.RESERVED, SessionState.STARTING
+                SessionState.RESERVED, SessionState.STARTING,
+                SessionState.PENDING_CAPACITY,
             }:
                 self.lifecycle.instance_active(record.instance_uuid)
                 started += 1

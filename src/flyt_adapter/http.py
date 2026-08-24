@@ -17,12 +17,13 @@ from .fakes import (
     FakeCredentialIssuer,
     FakeFlytBackend,
     FakeQuotaProvider,
+    SessionQuotaProvider,
     InMemoryApprovalRegistry,
 )
 from .injection import render_cloud_config
 from .flyt import FlytUnixBackend, GpuCellFlytBackend
 from .kubernetes import GpuCellProfile, KubernetesGpuCellProvider, UrllibKubernetesTransport
-from .models import InstanceRequest
+from .models import InstanceRequest, SessionState
 from .network import FakeServicePortProvider, NeutronServicePortProvider
 from .openstack import (
     OpenStackCatalog,
@@ -47,6 +48,33 @@ class Application:
     catalog: OpenStackCatalog | None = None
     service_ports: ServicePortProvider | None = None
 
+    def _materialize_for_vendor_data(self, instance_uuid: str):
+        """Create the credential/session before Nova assembles guest metadata.
+
+        Dynamic vendordata is fetched while the server is still building, so
+        waiting for instance.create.end creates an impossible dependency: the
+        guest cannot boot without data that is produced only after it boots.
+        The later notification remains an idempotent reconciliation signal.
+        """
+        record = self.lifecycle.sessions.get(instance_uuid)
+        if record is not None and record.state in {
+            SessionState.RESERVED, SessionState.STARTING
+        }:
+            record = self.lifecycle.finalize_scheduled_build(instance_uuid)
+            record = self.lifecycle.instance_active(instance_uuid)
+        return record
+
+    def _injection_target(self, instance_uuid: str):
+        package = self.config.client_package
+        manager_endpoint = self.config.client_manager_endpoint
+        port = self.service_ports.get(instance_uuid) if self.service_ports else None
+        if port is not None:
+            endpoint = self.config.service_network.endpoints.get(port.availability_zone)
+            if endpoint:
+                package = replace(package, resolve_address=endpoint)
+                manager_endpoint = f"tcp://{endpoint}:12402"
+        return package, manager_endpoint
+
     @classmethod
     def build(cls, config: ServiceConfig) -> "Application":
         sessions = SQLiteSessionStore(config.database)
@@ -69,12 +97,13 @@ class Application:
                 config.openstack.token,
                 transport,
                 config.service_network.networks,
+                config.service_network.subnets,
                 config.service_network.security_group_ids,
             )
         else:
             capacity = FakeCapacityProvider(dict(config.inventory))
             service_ports = FakeServicePortProvider(config.service_network.networks)
-        quotas = FakeQuotaProvider(dict(config.quotas))
+        quotas = SessionQuotaProvider(dict(config.quotas), sessions)
         backend = (
             FlytUnixBackend(
                 config.flyt_manager.socket_path, config.flyt_manager.profiles
@@ -99,6 +128,7 @@ class Application:
                         cells.endpoint, cells.token_file, cells.ca_file
                     ),
                     runtime_class_name=cells.runtime_class_name,
+                    host_network=cells.host_network,
                 ),
                 cells.session_profiles,
             )
@@ -109,9 +139,10 @@ class Application:
                     capacity.reservations[record.reservation_id] = (
                         record.profile, record.instance_uuid, record.project_id, "restored"
                     )
-                quotas.reservations[record.instance_uuid] = (
-                    record.project_id, record.profile
-                )
+                if isinstance(quotas, FakeQuotaProvider):
+                    quotas.reservations[record.instance_uuid] = (
+                        record.project_id, record.profile
+                    )
                 if record.backend_session_id and isinstance(backend, FakeFlytBackend):
                     backend.sessions[record.backend_session_id] = record.profile
                 if record.bootstrap_token:
@@ -188,14 +219,12 @@ class Application:
             if not isinstance(body, dict):
                 raise InvalidPayload("prebuild body must be an object")
             request = instance_request(body)
-            if self.catalog:
-                request = InstanceRequest(
-                    instance_uuid=request.instance_uuid,
-                    project_id=request.project_id,
-                    user_id=request.user_id,
-                    flavor=self.catalog.flavor(request.flavor.id),
-                    image=self.catalog.image(request.image.id),
-                )
+            # Nova already resolved the Flavor and Glance image before this
+            # authenticated pre-scheduling hook.  Re-entering Nova here can
+            # deadlock or time out its API workers under load.  Validate the
+            # signed service-to-service payload against the local approval
+            # policy instead; notification/reconciliation paths still refresh
+            # authoritative catalog state independently.
             profile = self.lifecycle.preflight(request)
             availability_zone = _required_string(body, "availability_zone")
             if self.service_ports is None:
@@ -205,9 +234,16 @@ class Application:
                 project_id=request.project_id,
                 availability_zone=availability_zone,
             )
+            request = replace(request, service_port=port)
+            # Reserve the logical FLYT session synchronously with Nova's
+            # pre-scheduling hook. Config-drive vendordata is fetched before
+            # create.start notifications are guaranteed to arrive, so the
+            # asynchronous consumer cannot be the first session creator.
+            record = self.lifecycle.prepare_build(request)
             return HTTPStatus.CREATED, {
                 "eligible": True,
                 "profile": profile,
+                "session": session(record),
                 "port": {
                     "id": port.port_id,
                     "network_id": port.network_id,
@@ -218,8 +254,7 @@ class Application:
             }, "application/json"
         if method == "DELETE" and path.startswith("/v1/prebuild/"):
             instance_uuid = _last_path(path)
-            if self.lifecycle.sessions.get(instance_uuid) is not None:
-                raise AdmissionError("cannot rollback a port after session admission")
+            self.lifecycle.abort_build(instance_uuid, "Nova prebuild rollback")
             if self.service_ports:
                 self.service_ports.delete(instance_uuid)
             return HTTPStatus.NO_CONTENT, "", "text/plain"
@@ -251,7 +286,7 @@ class Application:
             instance_uuid = _required_string(body, "instance-id")
             project_id = _required_string(body, "project-id")
             image_id = _required_string(body, "image-id")
-            record = self.lifecycle.sessions.get(instance_uuid)
+            record = self._materialize_for_vendor_data(instance_uuid)
             if record is None:
                 # A non-FLYT VM is not an error.  With the Nova target named
                 # `cloud-init`, JSON null causes cloud-init to ignore it.
@@ -261,27 +296,30 @@ class Application:
             approval = self.lifecycle.approvals.find(image_id)
             if approval is None:
                 raise InvalidPayload("vendor-data image is not approved")
+            package, manager_endpoint = self._injection_target(instance_uuid)
             value = render_cloud_config(
-                package=self.config.client_package,
+                package=package,
                 bootstrap_token=self.lifecycle.bootstrap_token(instance_uuid),
                 instance_uuid=instance_uuid,
                 generation=record.generation,
-                manager_endpoint=self.config.client_manager_endpoint,
+                manager_endpoint=manager_endpoint,
             )
             # DynamicJSON wraps this value using the configured target name.
-            # Configure the target as `cloud-init@...`; Nova will consequently
-            # publish {"cloud-init":"#cloud-config..."}, which is the schema
-            # consumed by cloud-init's OpenStack datasource.
+            # Configure the target as `cloud-init@...`; cloud-init extracts the
+            # value from vendordata2.json and executes this vendor shell script
+            # independently from the tenant's cloud-config.
             return HTTPStatus.OK, value, "application/json"
         if method == "POST" and path.startswith("/v1/vendor-data/"):
             instance_uuid = _last_path(path)
+            self._materialize_for_vendor_data(instance_uuid)
             token = self.lifecycle.bootstrap_token(instance_uuid)
+            package, manager_endpoint = self._injection_target(instance_uuid)
             value = render_cloud_config(
-                package=self.config.client_package,
+                package=package,
                 bootstrap_token=token,
                 instance_uuid=instance_uuid,
                 generation=self.lifecycle.sessions[instance_uuid].generation,
-                manager_endpoint=self.config.client_manager_endpoint,
+                manager_endpoint=manager_endpoint,
             )
             return HTTPStatus.OK, value, "text/cloud-config"
         return HTTPStatus.NOT_FOUND, {"error": "not found"}, "application/json"

@@ -12,8 +12,19 @@ spec:
   backoffLimit: 3
   template:
     spec:
-      restartPolicy: OnFailure
+      restartPolicy: Never
+      {{- if .Values.podNetwork.hostNetwork }}
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- end }}
+      {{- if .Values.gpuCells.enabled }}
+      serviceAccountName: {{ .Values.gpuCells.serviceAccountName }}
+      {{- end }}
       automountServiceAccountToken: false
+      nodeSelector:
+        {{- toYaml .Values.nodeSelector | nindent 8 }}
+      tolerations:
+        {{- toYaml .Values.tolerations | nindent 8 }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -35,9 +46,26 @@ spec:
         volumeMounts:
         - {name: config, mountPath: /etc/flyt-adapter, readOnly: true}
         - {name: tmp, mountPath: /tmp}
+        {{- if .Values.openstack.caConfigMapName }}
+        - {name: openstack-ca, mountPath: /etc/flyt-openstack-ca, readOnly: true}
+        {{- end }}
+        {{- if .Values.gpuCells.enabled }}
+        - {name: kubernetes-api, mountPath: /var/run/secrets/flyt-kubernetes, readOnly: true}
+        {{- end }}
       volumes:
       - name: config
         configMap: {name: {{ include "flyt-adapter.name" . }} }
       - name: tmp
         emptyDir: {}
+      {{- if .Values.openstack.caConfigMapName }}
+      - name: openstack-ca
+        configMap: {name: {{ .Values.openstack.caConfigMapName }}}
+      {{- end }}
+      {{- if .Values.gpuCells.enabled }}
+      - name: kubernetes-api
+        projected:
+          sources:
+          - serviceAccountToken: {path: token, expirationSeconds: 3600}
+          - configMap: {name: kube-root-ca.crt, items: [{key: ca.crt, path: ca.crt}]}
+      {{- end }}
 {{- end }}

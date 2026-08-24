@@ -23,6 +23,7 @@ class KubernetesGpuCellTest(unittest.TestCase):
             )},
             transport=transport or FakeKubernetesTransport(),
             runtime_class_name="nvidia",
+            host_network=True,
         )
 
     def test_whole_gpu_claim_and_cell_are_idempotent(self):
@@ -41,6 +42,35 @@ class KubernetesGpuCellTest(unittest.TestCase):
                    if "/pods/" in path)
         env = {item["name"]: item["value"] for item in pod["spec"]["containers"][0]["env"]}
         self.assertEqual("NVIDIA GeForce RTX 3090 Ti", env["FLYT_EXPECTED_GPU_PRODUCT_NAME"])
+        self.assertTrue(pod["spec"]["hostNetwork"])
+        self.assertEqual("ClusterFirstWithHostNet", pod["spec"]["dnsPolicy"])
+
+    def test_dra_readiness_requires_device_class_and_expected_product(self):
+        provider = self.provider()
+        result = provider.readiness("rtx3090ti-mps")
+        self.assertFalse(result.ready)
+        device_class_path = "/apis/resource.k8s.io/v1/deviceclasses/gpu.nvidia.com"
+        slices_path = "/apis/resource.k8s.io/v1/resourceslices"
+        provider.transport.objects[device_class_path] = {"metadata": {"name": "gpu.nvidia.com"}}
+        provider.transport.objects[slices_path] = {"items": [{"spec": {
+            "driver": "gpu.nvidia.com",
+            "devices": [{"name": "gpu-0", "attributes": {
+                "gpu.nvidia.com/productName": {"string": "NVIDIA RTX 6000 Ada"}
+            }}],
+        }}]}
+        result = provider.readiness("rtx3090ti-mps")
+        self.assertFalse(result.ready)
+        self.assertIn("not published", result.reason)
+        provider.transport.objects[slices_path]["items"][0]["spec"]["devices"][0][
+            "attributes"
+        ]["gpu.nvidia.com/productName"]["string"] = "NVIDIA GeForce RTX 3090 Ti"
+        self.assertTrue(provider.readiness("rtx3090ti-mps").ready)
+
+        attributes = provider.transport.objects[slices_path]["items"][0]["spec"][
+            "devices"
+        ][0]["attributes"]
+        attributes["productName"] = attributes.pop("gpu.nvidia.com/productName")
+        self.assertTrue(provider.readiness("rtx3090ti-mps").ready)
 
     def test_ready_status_and_idempotent_delete(self):
         provider = self.provider()
@@ -54,6 +84,22 @@ class KubernetesGpuCellTest(unittest.TestCase):
         provider.delete("rtx3090ti-mps")
         self.assertIsNone(provider.get("rtx3090ti-mps"))
         self.assertEqual("flyt-cell-rtx3090ti-mps", cell.name)
+
+    def test_image_drift_replaces_pod_and_retains_claim(self):
+        provider = self.provider()
+        provider.ensure(cell_profile="rtx3090ti-mps")
+        pod_path = next(path for path in provider.transport.objects if "/pods/" in path)
+        claim_path = next(path for path in provider.transport.objects if "/resourceclaims/" in path)
+        provider.transport.objects[pod_path]["spec"]["containers"][0]["image"] = (
+            "registry.example/flyt-gpu-cell@sha256:" + "b" * 64
+        )
+        provider.ensure(cell_profile="rtx3090ti-mps")
+        self.assertIn(claim_path, provider.transport.objects)
+        self.assertEqual(
+            provider.image,
+            provider.transport.objects[pod_path]["spec"]["containers"][0]["image"],
+        )
+        self.assertIn(("DELETE", pod_path), provider.transport.requests)
 
     def test_pod_failure_rolls_back_claim(self):
         transport = FakeKubernetesTransport(fail_pod_create=True)
