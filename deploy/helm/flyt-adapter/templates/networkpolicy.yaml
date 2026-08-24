@@ -1,0 +1,59 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "flyt-adapter.name" . }}
+  labels:
+    {{- include "flyt-adapter.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "flyt-adapter.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+  - from:
+    - podSelector: {}
+    ports:
+    - {protocol: TCP, port: {{ .Values.service.port }}}
+  {{- if .Values.clusterManager.enabled }}
+  {{- if .Values.clusterManager.nodeCidrs }}
+  - from:
+    {{- range .Values.clusterManager.nodeCidrs }}
+    - ipBlock: {cidr: {{ . | quote }}}
+    {{- end }}
+    ports:
+    - {protocol: TCP, port: {{ .Values.clusterManager.nodePort }}}
+  {{- end }}
+  - from:
+    {{- range .Values.clusterManager.clientCidrs }}
+    - ipBlock: {cidr: {{ . | quote }}}
+    {{- end }}
+    ports:
+    - {protocol: TCP, port: {{ .Values.clusterManager.clientPort }}}
+  {{- end }}
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: openstack
+    ports:
+    - {protocol: TCP, port: 443}
+    - {protocol: TCP, port: 80}
+    {{- if .Values.notifications.enabled }}
+    - {protocol: TCP, port: 5672}
+    {{- end }}
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+    ports:
+    - {protocol: UDP, port: 53}
+    - {protocol: TCP, port: 53}
+  {{- if .Values.clusterManager.enabled }}
+  - to:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: {{ include "flyt-adapter.name" . }}-mongodb
+    ports:
+    - {protocol: TCP, port: 27017}
+  {{- end }}

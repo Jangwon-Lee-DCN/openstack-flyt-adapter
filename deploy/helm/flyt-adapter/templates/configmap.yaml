@@ -1,0 +1,60 @@
+{{- $packageURL := required "config.clientPackage.url is required" .Values.config.clientPackage.url -}}
+{{- $packageDigest := required "config.clientPackage.digest is required" .Values.config.clientPackage.digest -}}
+{{- if and .Values.gpuCells.enabled (not .Values.clusterManager.enabled) }}{{ fail "gpuCells requires clusterManager.enabled" }}{{ end }}
+{{- if .Values.gpuCells.enabled }}
+{{- $gpuDigest := required "gpuCells.image.digest is required" .Values.gpuCells.image.digest -}}
+{{- if not (hasPrefix "sha256:" $gpuDigest) }}{{ fail "gpuCells.image.digest must start with sha256:" }}{{ end }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "flyt-adapter.name" . }}
+  labels:
+    {{- include "flyt-adapter.labels" . | nindent 4 }}
+data:
+  config.json: |
+    {
+      "database": "/var/lib/flyt-adapter/sessions.db",
+      "listen_host": "0.0.0.0",
+      "listen_port": {{ .Values.service.port }},
+      "client_manager_endpoint": {{ required "config.clientManagerEndpoint is required" .Values.config.clientManagerEndpoint | quote }},
+      "reconcile_interval_seconds": {{ .Values.config.reconcileIntervalSeconds }},
+      "orphan_grace_seconds": {{ .Values.config.orphanGraceSeconds }},
+      "approvals": {{ .Values.config.approvals | toJson }},
+      "inventory": {{ .Values.config.inventory | toJson }},
+      "quotas": {{ .Values.config.quotas | toJson }},
+      "service_network": {
+        "networks": {{ .Values.config.serviceNetwork.networks | toJson }},
+        "security_group_ids": {{ .Values.config.serviceNetwork.securityGroupIds | toJson }}
+      },
+      "openstack": {{- if .Values.openstack.enabled }} {
+        "nova_endpoint": {{ required "openstack.novaEndpoint is required" .Values.openstack.novaEndpoint | quote }},
+        "glance_endpoint": {{ required "openstack.glanceEndpoint is required" .Values.openstack.glanceEndpoint | quote }},
+        "placement_endpoint": {{ required "openstack.placementEndpoint is required" .Values.openstack.placementEndpoint | quote }},
+        "neutron_endpoint": {{ required "openstack.neutronEndpoint is required" .Values.openstack.neutronEndpoint | quote }},
+        "ca_file": {{ .Values.openstack.caFile | default "" | quote }}
+      }{{- else }} null{{- end }},
+      "placement_sync": {{- if .Values.openstack.placementSync.enabled }} {
+        "aggregate_uuid": {{ required "openstack.placementSync.aggregateUuid is required" .Values.openstack.placementSync.aggregateUuid | quote }},
+        "compute_provider_uuids": {{ .Values.openstack.placementSync.computeProviderUuids | toJson }}
+      }{{- else }} null{{- end }},
+      "flyt_manager": {{- if .Values.clusterManager.enabled }} {
+        "socket_path": "/run/flyt/manager.sock",
+        "profiles": {{ .Values.config.flytManager.profiles | toJson }}
+      }{{- else }} null{{- end }},
+      "kubernetes_gpu_cells": {{- if .Values.gpuCells.enabled }} {
+        "endpoint": {{ .Values.gpuCells.endpoint | quote }},
+        "namespace": {{ .Values.gpuCells.namespace | quote }},
+        "token_file": {{ .Values.gpuCells.tokenFile | quote }},
+        "ca_file": {{ .Values.gpuCells.caFile | quote }},
+        "image": {{ printf "%s@%s" (required "gpuCells.image.repository is required" .Values.gpuCells.image.repository) (required "gpuCells.image.digest is required" .Values.gpuCells.image.digest) | quote }},
+        "cluster_manager_address": {{ required "gpuCells.clusterManagerAddress is required" .Values.gpuCells.clusterManagerAddress | quote }},
+        "runtime_class_name": {{ .Values.gpuCells.runtimeClassName | quote }},
+        "session_profiles": {{ .Values.gpuCells.sessionProfiles | toJson }},
+        "profiles": {{ .Values.gpuCells.profiles | toJson }}
+      }{{- else }} null{{- end }},
+      "client_package": {
+        "url": {{ $packageURL | quote }},
+        "digest": {{ $packageDigest | quote }}
+      }
+    }

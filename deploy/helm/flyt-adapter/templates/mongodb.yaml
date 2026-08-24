@@ -1,0 +1,67 @@
+{{- if .Values.clusterManager.enabled }}
+{{- $repository := required "clusterManager.mongodb.image.repository is required" .Values.clusterManager.mongodb.image.repository }}
+{{- $digest := required "clusterManager.mongodb.image.digest is required" .Values.clusterManager.mongodb.image.digest }}
+{{- if not (hasPrefix "sha256:" $digest) }}{{ fail "clusterManager.mongodb.image.digest must start with sha256:" }}{{ end }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "flyt-adapter.name" . }}-mongodb
+spec:
+  selector:
+    app.kubernetes.io/name: {{ include "flyt-adapter.name" . }}-mongodb
+  ports: [{name: mongodb, port: 27017, targetPort: mongodb}]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "flyt-adapter.name" . }}-mongodb
+spec:
+  serviceName: {{ include "flyt-adapter.name" . }}-mongodb
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "flyt-adapter.name" . }}-mongodb
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "flyt-adapter.name" . }}-mongodb
+    spec:
+      securityContext: {runAsNonRoot: true, runAsUser: 999, runAsGroup: 999, fsGroup: 999}
+      containers:
+      - name: mongodb
+        image: {{ printf "%s@%s" $repository $digest | quote }}
+        args: ["--auth", "--bind_ip_all"]
+        env:
+        - name: MONGO_INITDB_ROOT_USERNAME
+          valueFrom: {secretKeyRef: {name: {{ .Values.clusterManager.mongodb.existingSecret }}, key: username}}
+        - name: MONGO_INITDB_ROOT_PASSWORD
+          valueFrom: {secretKeyRef: {name: {{ .Values.clusterManager.mongodb.existingSecret }}, key: password}}
+        ports: [{name: mongodb, containerPort: 27017}]
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities: {drop: ["ALL"]}
+        volumeMounts: [{name: data, mountPath: /data/db}]
+  volumeClaimTemplates:
+  - metadata: {name: data}
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests: {storage: {{ .Values.clusterManager.mongodb.storageSize }}}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "flyt-adapter.name" . }}-mongodb
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "flyt-adapter.name" . }}-mongodb
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: {{ include "flyt-adapter.name" . }}
+          app.kubernetes.io/instance: {{ .Release.Name }}
+    ports: [{protocol: TCP, port: 27017}]
+{{- end }}

@@ -1,0 +1,23 @@
+{{- if .Values.clusterManager.enabled }}
+{{- if eq .Values.clusterManager.service.type "ClusterIP" }}{{ fail "clusterManager.service.type must expose the manager to the dedicated FLYT network" }}{{ end }}
+{{- if not .Values.clusterManager.clientCidrs }}{{ fail "clusterManager.clientCidrs is required" }}{{ end }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "flyt-adapter.name" . }}-manager
+  labels:
+    {{- include "flyt-adapter.labels" . | nindent 4 }}
+  annotations:
+    {{- toYaml .Values.clusterManager.service.annotations | nindent 4 }}
+spec:
+  type: {{ .Values.clusterManager.service.type }}
+  {{- with .Values.clusterManager.service.loadBalancerIP }}
+  loadBalancerIP: {{ . | quote }}
+  {{- end }}
+  selector:
+    app.kubernetes.io/name: {{ include "flyt-adapter.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+  - {name: flyt-node, port: {{ .Values.clusterManager.nodePort }}, targetPort: flyt-node, protocol: TCP}
+  - {name: flyt-client, port: {{ .Values.clusterManager.clientPort }}, targetPort: flyt-client, protocol: TCP}
+{{- end }}

@@ -1,0 +1,113 @@
+replicaCount: 1
+
+image:
+  repository: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+
+existingSecret: flyt-adapter
+
+notifications:
+  enabled: false
+  secretName: flyt-adapter-notifications
+  secretKey: transport-url
+
+reconciler:
+  enabled: false
+
+openstack:
+  enabled: false
+  novaEndpoint: ""
+  glanceEndpoint: ""
+  placementEndpoint: ""
+  neutronEndpoint: ""
+  caFile: ""
+  tokenSecretName: flyt-adapter-openstack
+  tokenSecretKey: token
+  placementSync:
+    enabled: false
+    aggregateUuid: ""
+    computeProviderUuids: []
+
+clusterManager:
+  enabled: false
+  image:
+    repository: ""
+    digest: ""
+  configSecret: flyt-cluster-manager
+  nodePort: 12401
+  clientPort: 12402
+  service:
+    type: LoadBalancer
+    loadBalancerIP: ""
+    annotations: {}
+  clientCidrs: []
+  nodeCidrs: []
+  mongodb:
+    image:
+      repository: ""
+      digest: ""
+    existingSecret: flyt-mongodb
+    storageSize: 1Gi
+
+gpuCells:
+  enabled: false
+  namespace: flyt-system
+  serviceAccountName: flyt-adapter
+  endpoint: https://kubernetes.default.svc
+  caFile: /var/run/secrets/flyt-kubernetes/ca.crt
+  tokenFile: /var/run/secrets/flyt-kubernetes/token
+  image:
+    repository: ""
+    digest: ""
+  clusterManagerAddress: ""
+  runtimeClassName: nvidia
+  sessionProfiles:
+    flyt-nvidia-rtx3090ti-mps-shared-v1: nvidia-rtx3090ti-whole-mps
+  profiles:
+    nvidia-rtx3090ti-whole-mps:
+      device_class: gpu.nvidia.com
+      expected_product_name: NVIDIA GeForce RTX 3090 Ti
+      selectors:
+        - "device.attributes['gpu.nvidia.com'].productName.lowerAscii().matches('^.*rtx 3090 ti.*$')"
+
+service:
+  port: 8080
+
+config:
+  clientManagerEndpoint: ""
+  reconcileIntervalSeconds: 60
+  orphanGraceSeconds: 900
+  approvals: []
+  inventory:
+    flyt-nvidia-rtx3090ti-mps-shared-v1: 0
+  quotas: []
+  serviceNetwork:
+    networks:
+      default: fake-flyt-network
+    securityGroupIds: []
+  flytManager:
+    profiles:
+      flyt-nvidia-rtx3090ti-mps-shared-v1:
+        compute_units: 16
+        memory_mb: 8192
+  clientPackage:
+    url: ""
+    digest: ""
+
+persistence:
+  enabled: false
+  size: 1Gi
+  storageClassName: ""
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

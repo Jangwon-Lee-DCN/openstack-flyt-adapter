@@ -1,0 +1,177 @@
+{{- $repository := required "image.repository is required" .Values.image.repository -}}
+{{- $digest := required "image.digest is required" .Values.image.digest -}}
+{{- if not (hasPrefix "sha256:" $digest) }}{{ fail "image.digest must start with sha256:" }}{{ end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "flyt-adapter.name" . }}
+  labels:
+    {{- include "flyt-adapter.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "flyt-adapter.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        {{- include "flyt-adapter.labels" . | nindent 8 }}
+    spec:
+      {{- if .Values.gpuCells.enabled }}
+      serviceAccountName: {{ .Values.gpuCells.serviceAccountName }}
+      {{- end }}
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+      - name: adapter
+        image: {{ printf "%s@%s" $repository $digest | quote }}
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        args: ["--config", "/etc/flyt-adapter/config.json"]
+        env:
+        - name: FLYT_API_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.existingSecret }}
+              key: api-token
+        {{- if .Values.openstack.enabled }}
+        - name: OS_TOKEN
+          valueFrom:
+            secretKeyRef: {name: {{ .Values.openstack.tokenSecretName }}, key: {{ .Values.openstack.tokenSecretKey }}}
+        {{- end }}
+        ports:
+        - {name: http, containerPort: {{ .Values.service.port }}, protocol: TCP}
+        readinessProbe:
+          httpGet: {path: /healthz, port: http}
+          initialDelaySeconds: 2
+          periodSeconds: 5
+        livenessProbe:
+          httpGet: {path: /healthz, port: http}
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities: {drop: ["ALL"]}
+          readOnlyRootFilesystem: true
+        resources:
+          {{- toYaml .Values.resources | nindent 10 }}
+        volumeMounts:
+        - {name: config, mountPath: /etc/flyt-adapter, readOnly: true}
+        - {name: state, mountPath: /var/lib/flyt-adapter}
+        - {name: tmp, mountPath: /tmp}
+        {{- if .Values.gpuCells.enabled }}
+        - {name: kubernetes-api, mountPath: /var/run/secrets/flyt-kubernetes, readOnly: true}
+        {{- end }}
+        {{- if .Values.clusterManager.enabled }}
+        - {name: manager-socket, mountPath: /run/flyt}
+        {{- end }}
+      {{- if .Values.notifications.enabled }}
+      - name: nova-notifications
+        image: {{ printf "%s@%s" $repository $digest | quote }}
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        args: ["--config", "/etc/flyt-adapter/config.json", "--mode", "notifications"]
+        env:
+        - name: FLYT_API_TOKEN
+          valueFrom:
+            secretKeyRef: {name: {{ .Values.existingSecret }}, key: api-token}
+        - name: FLYT_NOTIFICATION_TRANSPORT_URL
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.notifications.secretName }}
+              key: {{ .Values.notifications.secretKey }}
+        {{- if .Values.openstack.enabled }}
+        - name: OS_TOKEN
+          valueFrom:
+            secretKeyRef: {name: {{ .Values.openstack.tokenSecretName }}, key: {{ .Values.openstack.tokenSecretKey }}}
+        {{- end }}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities: {drop: ["ALL"]}
+          readOnlyRootFilesystem: true
+        resources:
+          {{- toYaml .Values.resources | nindent 10 }}
+        volumeMounts:
+        - {name: config, mountPath: /etc/flyt-adapter, readOnly: true}
+        - {name: state, mountPath: /var/lib/flyt-adapter}
+        - {name: tmp, mountPath: /tmp}
+      {{- end }}
+      {{- if .Values.reconciler.enabled }}
+      {{- if not .Values.openstack.enabled }}{{ fail "reconciler requires openstack.enabled" }}{{ end }}
+      - name: reconciler
+        image: {{ printf "%s@%s" $repository $digest | quote }}
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        args: ["--config", "/etc/flyt-adapter/config.json", "--mode", "reconcile"]
+        env:
+        - name: FLYT_API_TOKEN
+          valueFrom:
+            secretKeyRef: {name: {{ .Values.existingSecret }}, key: api-token}
+        - name: OS_TOKEN
+          valueFrom:
+            secretKeyRef: {name: {{ .Values.openstack.tokenSecretName }}, key: {{ .Values.openstack.tokenSecretKey }}}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities: {drop: ["ALL"]}
+          readOnlyRootFilesystem: true
+        resources:
+          {{- toYaml .Values.resources | nindent 10 }}
+        volumeMounts:
+        - {name: config, mountPath: /etc/flyt-adapter, readOnly: true}
+        - {name: state, mountPath: /var/lib/flyt-adapter}
+        - {name: tmp, mountPath: /tmp}
+      {{- end }}
+      {{- if .Values.clusterManager.enabled }}
+      {{- $managerRepository := required "clusterManager.image.repository is required" .Values.clusterManager.image.repository }}
+      {{- $managerDigest := required "clusterManager.image.digest is required" .Values.clusterManager.image.digest }}
+      {{- if not (hasPrefix "sha256:" $managerDigest) }}{{ fail "clusterManager.image.digest must start with sha256:" }}{{ end }}
+      - name: cluster-manager
+        image: {{ printf "%s@%s" $managerRepository $managerDigest | quote }}
+        imagePullPolicy: IfNotPresent
+        env:
+        - {name: FLYT_CLUSTER_MANAGER_CONFIG, value: /etc/flyt/cluster-manager.toml}
+        ports:
+        - {name: flyt-node, containerPort: {{ .Values.clusterManager.nodePort }}}
+        - {name: flyt-client, containerPort: {{ .Values.clusterManager.clientPort }}}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities: {drop: ["ALL"]}
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - {name: manager-config, mountPath: /etc/flyt, readOnly: true}
+        - {name: manager-socket, mountPath: /run/flyt}
+        - {name: tmp, mountPath: /tmp}
+      {{- end }}
+      volumes:
+      - name: config
+        configMap: {name: {{ include "flyt-adapter.name" . }}}
+      - name: state
+        {{- if .Values.persistence.enabled }}
+        persistentVolumeClaim: {claimName: {{ include "flyt-adapter.name" . }}}
+        {{- else }}
+        emptyDir: {}
+        {{- end }}
+      - name: tmp
+        emptyDir: {}
+      {{- if .Values.gpuCells.enabled }}
+      - name: kubernetes-api
+        projected:
+          sources:
+          - serviceAccountToken: {path: token, expirationSeconds: 3600, audience: https://kubernetes.default.svc}
+          - configMap: {name: kube-root-ca.crt, items: [{key: ca.crt, path: ca.crt}]}
+      {{- end }}
+      {{- if .Values.clusterManager.enabled }}
+      - name: manager-config
+        secret: {secretName: {{ .Values.clusterManager.configSecret }}}
+      - name: manager-socket
+        emptyDir: {}
+      {{- end }}
+      nodeSelector:
+        {{- toYaml .Values.nodeSelector | nindent 8 }}
+      tolerations:
+        {{- toYaml .Values.tolerations | nindent 8 }}
+      affinity:
+        {{- toYaml .Values.affinity | nindent 8 }}

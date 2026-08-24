@@ -1,0 +1,157 @@
+openapi: 3.1.0
+info:
+  title: OpenStack FLYT Adapter Internal API
+  version: 0.1.0
+paths:
+  /healthz:
+    get:
+      responses:
+        '200':
+          description: service ready
+  /metrics:
+    get:
+      responses:
+        '200':
+          description: Prometheus session-state metrics
+  /v1/admissions:
+    post:
+      security: [{internalToken: []}]
+      description: Validate an approved image and reserve quota/capacity before Nova build.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/Admission'}
+      responses:
+        '201': {description: reservation created}
+        '409': {description: admission rejected}
+  /v1/preflight:
+    post:
+      security: [{internalToken: []}]
+      description: Validate image, Flavor, quota, and candidate capacity without claiming it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/Admission'}
+      responses:
+        '200': {description: request is eligible for Nova scheduling}
+        '409': {description: request is not eligible}
+  /v1/prebuild:
+    post:
+      security: [{internalToken: []}]
+      description: Preflight and idempotently create the managed AZ-local FLYT service port.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+              - {$ref: '#/components/schemas/Admission'}
+              - type: object
+                required: [availability_zone]
+                properties:
+                  availability_zone: {type: string}
+      responses:
+        '201': {description: request is eligible and managed port exists}
+        '409': {description: request rejected and no port created}
+  /v1/prebuild/{instance_uuid}:
+    delete:
+      security: [{internalToken: []}]
+      description: Roll back a managed port when Nova fails before session admission.
+      parameters:
+      - name: instance_uuid
+        in: path
+        required: true
+        schema: {type: string}
+      responses:
+        '204': {description: managed port is absent}
+        '409': {description: session already admitted; use lifecycle deletion}
+  /v1/events:
+    post:
+      security: [{internalToken: []}]
+      description: Consume a normalized Nova instance lifecycle event.
+      responses:
+        '200': {description: lifecycle reconciled}
+        '409': {description: event rejected}
+  /v1/sessions/{instance_uuid}:
+    get:
+      security: [{internalToken: []}]
+      parameters:
+      - name: instance_uuid
+        in: path
+        required: true
+        schema: {type: string}
+      responses:
+        '200': {description: session status}
+        '404': {description: session absent}
+  /v1/vendor-data/{instance_uuid}:
+    post:
+      security: [{internalToken: []}]
+      parameters:
+      - name: instance_uuid
+        in: path
+        required: true
+        schema: {type: string}
+      responses:
+        '200':
+          description: idempotent cloud-init vendor data for an admitted session
+          content:
+            text/cloud-config: {}
+        '409': {description: session not ready or bootstrap token unavailable}
+  /v1/nova/vendor-data:
+    post:
+      security: [{novaServiceToken: []}]
+      description: Nova DynamicJSON target. Configure its target name as cloud-init.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [project-id, instance-id, image-id]
+              properties:
+                project-id: {type: string}
+                instance-id: {type: string}
+                image-id: {type: string}
+                user-data: {}
+                hostname: {type: string}
+                metadata: {type: object}
+                boot-roles: {type: string}
+      responses:
+        '200':
+          description: JSON string containing cloud-config, or null for a non-FLYT VM
+          content:
+            application/json: {}
+        '409': {description: session is not ready or request identity mismatches}
+components:
+  securitySchemes:
+    internalToken:
+      type: http
+      scheme: bearer
+    novaServiceToken:
+      type: apiKey
+      in: header
+      name: X-Auth-Token
+  schemas:
+    Admission:
+      type: object
+      required: [instance_uuid, project_id, user_id, flavor, image]
+      properties:
+        instance_uuid: {type: string}
+        project_id: {type: string}
+        user_id: {type: string}
+        flavor:
+          type: object
+          required: [id, name, extra_specs]
+          properties:
+            id: {type: string}
+            name: {type: string}
+            extra_specs: {type: object, additionalProperties: {type: string}}
+        image:
+          type: object
+          required: [id, checksum, properties]
+          properties:
+            id: {type: string}
+            checksum: {type: string}
+            properties: {type: object, additionalProperties: {type: string}}

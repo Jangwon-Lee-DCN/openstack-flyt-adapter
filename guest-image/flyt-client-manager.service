@@ -1,0 +1,21 @@
+[Unit]
+Description=FLYT virtual CUDA client manager
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=FLYT_CLIENT_MANAGER_CONFIG=/etc/flyt/client-manager.toml
+ExecStart=/opt/flyt/bin/flyt-client-manager
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/run/flyt
+RuntimeDirectory=flyt
+RuntimeDirectoryMode=0750
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,35 @@
+{{- if .Values.gpuCells.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Values.gpuCells.serviceAccountName }}
+  namespace: {{ .Release.Namespace }}
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "flyt-adapter.name" . }}-gpu-cells
+  namespace: {{ .Values.gpuCells.namespace }}
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch", "create", "delete"]
+- apiGroups: ["resource.k8s.io"]
+  resources: ["resourceclaims"]
+  verbs: ["get", "list", "watch", "create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "flyt-adapter.name" . }}-gpu-cells
+  namespace: {{ .Values.gpuCells.namespace }}
+subjects:
+- kind: ServiceAccount
+  name: {{ .Values.gpuCells.serviceAccountName }}
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "flyt-adapter.name" . }}-gpu-cells
+{{- end }}

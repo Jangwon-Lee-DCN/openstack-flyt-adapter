@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+package=${1:?client package path}
+credential_file=${2:?credential file}
+session_file=${3:?session file}
+[[ $(id -u) == 0 ]] || { echo "installer must run as root" >&2; exit 1; }
+[[ -s $package && -s $credential_file && -s $session_file ]] || exit 1
+
+# The image is approved only after this fixed installer is present. Dynamic
+# vendor data supplies values, never shell code; validate before loading them.
+instance_uuid=$(sed -n 's/^FLYT_INSTANCE_UUID=//p' "$session_file")
+manager_endpoint=$(sed -n 's/^FLYT_MANAGER_ENDPOINT=//p' "$session_file")
+generation=$(sed -n 's/^FLYT_GENERATION=//p' "$session_file")
+credential=$(tr -d '\r\n' < "$credential_file")
+[[ $instance_uuid =~ ^[0-9A-Za-z-]{8,64}$ ]]
+[[ $manager_endpoint =~ ^tcp://[A-Za-z0-9._-]+:[0-9]{1,5}$ ]]
+[[ $generation =~ ^[1-9][0-9]*$ ]]
+[[ ${#credential} -ge 32 ]]
+manager=${manager_endpoint#tcp://}
+manager_host=${manager%:*}
+manager_port=${manager##*:}
+(( manager_port >= 1 && manager_port <= 65535 ))
+
+stage=$(mktemp -d /run/flyt-install.XXXXXX)
+trap 'rm -rf "$stage"' EXIT
+tar --extract --gzip --file "$package" --directory "$stage" \
+  --no-same-owner --no-same-permissions
+for file in flyt-client-manager cricket-client.so; do
+  [[ -f $stage/$file && ! -L $stage/$file ]] || {
+    echo "client package lacks $file" >&2; exit 1;
+  }
+done
+
+install -d -m 0755 /opt/flyt/bin /opt/flyt/lib /etc/flyt
+install -m 0755 "$stage/flyt-client-manager" /opt/flyt/bin/flyt-client-manager
+install -m 0755 "$stage/cricket-client.so" /opt/flyt/lib/cricket-client.so
+cat > /etc/flyt/client-manager.toml <<EOF
+[resource-manager]
+address = "$manager_host"
+port = $manager_port
+
+[managed-session]
+workload-id = "$instance_uuid"
+generation = $generation
+credential = "$credential"
+
+[ipc]
+mqueue-path = "/run/flyt/client-manager.queue"
+
+[vcuda-client]
+process_monitor_period = 10
+EOF
+chmod 0600 /etc/flyt/client-manager.toml
+install -m 0644 "$stage/flyt-client-manager.service" \
+  /etc/systemd/system/flyt-client-manager.service
+systemctl daemon-reload
+systemctl enable --now flyt-client-manager.service

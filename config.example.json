@@ -1,0 +1,37 @@
+{
+  "database": "/tmp/flyt-adapter-sessions.db",
+  "listen_host": "127.0.0.1",
+  "listen_port": 8080,
+  "client_manager_endpoint": "tcp://172.30.0.5:12402",
+  "notification_topics": ["versioned_notifications"],
+  "flyt_manager": null,
+  "kubernetes_gpu_cells": null,
+  "service_network": {
+    "networks": {
+      "default": "fake-flyt-network"
+    },
+    "security_group_ids": []
+  },
+  "approvals": [
+    {
+      "image_id": "development-approved-image",
+      "checksum": "development-checksum",
+      "injection_schema": "v1",
+      "compatibility": "cuda-contract-v1"
+    }
+  ],
+  "inventory": {
+    "flyt-nvidia-rtx3090ti-mps-shared-v1": 0
+  },
+  "quotas": [
+    {
+      "project_id": "development-project",
+      "profile": "flyt-nvidia-rtx3090ti-mps-shared-v1",
+      "limit": 1
+    }
+  ],
+  "client_package": {
+    "url": "https://packages.example.invalid/flyt-client.pkg",
+    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+}
