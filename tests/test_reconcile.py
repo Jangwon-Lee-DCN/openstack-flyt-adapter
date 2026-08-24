@@ -12,7 +12,8 @@ from flyt_adapter.fakes import (
     InMemoryApprovalRegistry,
 )
 from flyt_adapter.models import (
-    Flavor, Image, ImageApproval, InstanceRequest, ManagedPort, SessionState,
+    BackendSession, Flavor, Image, ImageApproval, InstanceRequest, ManagedPort,
+    SessionState,
 )
 from flyt_adapter.network import FakeServicePortProvider
 from flyt_adapter.reconcile import OrphanPortReconciler, SessionReconciler
@@ -93,6 +94,23 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(SessionState.DELETED, self.lifecycle.sessions["instance-3"].state)
         self.assertEqual(1, len(self.capacity.reservations))
         self.assertEqual(1, len(self.backend.sessions))
+
+    def test_promotes_pending_capacity_after_gpu_cell_becomes_ready(self) -> None:
+        record = self.lifecycle.sessions["instance-1"]
+        record.state = SessionState.PENDING_CAPACITY
+        self.backend.refresh_session = lambda _record: BackendSession(
+            _record.instance_uuid, SessionState.READY
+        )
+        result = SessionReconciler(
+            self.lifecycle,
+            FakeNovaInventory({
+                "instance-1": "ACTIVE",
+                "instance-2": "BUILD",
+                "instance-3": "BUILD",
+            }),
+        ).run_once()
+        self.assertEqual(1, result.started)
+        self.assertEqual(SessionState.READY, record.state)
 
     def test_orphan_port_cleanup_observes_grace_vm_and_session(self) -> None:
         ports = FakeServicePortProvider({"az1": "network-1"})

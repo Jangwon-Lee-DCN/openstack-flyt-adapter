@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import ssl
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -58,22 +59,30 @@ class UrllibJsonTransport:
             url, data=body, headers=request_headers, method=method
         )
         context = ssl.create_default_context(cafile=self.ca_file)
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout, context=context) as response:
-                raw = response.read(4 * 1024 * 1024 + 1)
-                if len(raw) > 4 * 1024 * 1024:
-                    raise OpenStackError("OpenStack response exceeds 4 MiB")
-                value = json.loads(raw) if raw else {}
-                if not isinstance(value, Mapping):
-                    raise OpenStackError("OpenStack response is not a JSON object")
-                return response.status, value
-        except urllib.error.HTTPError as exc:
-            detail = exc.read(64 * 1024).decode(errors="replace")
-            raise OpenStackHttpError(
-                exc.code, f"{method} {url} failed with {exc.code}: {detail}"
-            ) from exc
-        except (urllib.error.URLError, TimeoutError) as exc:
-            raise OpenStackError(f"{method} {url} failed: {exc}") from exc
+        attempts = 3 if method == "GET" else 1
+        for attempt in range(attempts):
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout, context=context) as response:
+                    raw = response.read(4 * 1024 * 1024 + 1)
+                    if len(raw) > 4 * 1024 * 1024:
+                        raise OpenStackError("OpenStack response exceeds 4 MiB")
+                    value = json.loads(raw) if raw else {}
+                    if not isinstance(value, Mapping):
+                        raise OpenStackError("OpenStack response is not a JSON object")
+                    return response.status, value
+            except urllib.error.HTTPError as exc:
+                detail = exc.read(64 * 1024).decode(errors="replace")
+                if method == "GET" and exc.code in {502, 503, 504} and attempt + 1 < attempts:
+                    time.sleep(1)
+                    continue
+                raise OpenStackHttpError(
+                    exc.code, f"{method} {url} failed with {exc.code}: {detail}"
+                ) from exc
+            except (urllib.error.URLError, TimeoutError) as exc:
+                if method == "GET" and attempt + 1 < attempts:
+                    time.sleep(1)
+                    continue
+                raise OpenStackError(f"{method} {url} failed: {exc}") from exc
 
 
 @dataclass(frozen=True)
@@ -92,7 +101,13 @@ class OpenStackCatalog:
         flavor = value.get("flavor")
         if not isinstance(flavor, Mapping):
             raise OpenStackError("Nova flavor response is malformed")
-        extra_specs = flavor.get("extra_specs", {})
+        _, specs_value = self.transport.request(
+            "GET",
+            f"{self.nova_endpoint.rstrip('/')}/flavors/"
+            f"{quote(flavor_id, safe='')}/os-extra_specs",
+            headers=self._headers(),
+        )
+        extra_specs = specs_value.get("extra_specs", {})
         if not isinstance(extra_specs, Mapping):
             raise OpenStackError("Nova flavor extra_specs are malformed")
         return Flavor(
@@ -261,12 +276,11 @@ class PlacementInventoryManager:
             f"{self.endpoint.rstrip('/')}/resource_classes/{resource_class}",
             headers=headers,
         )
-        for trait in ("CUSTOM_FLYT_REMOTE_GPU", "MISC_SHARES_VIA_AGGREGATE"):
-            self.transport.request(
-                "PUT",
-                f"{self.endpoint.rstrip('/')}/traits/{trait}",
-                headers=headers,
-            )
+        self.transport.request(
+            "PUT",
+            f"{self.endpoint.rstrip('/')}/traits/CUSTOM_FLYT_REMOTE_GPU",
+            headers=headers,
+        )
         _, providers = self.transport.request(
             "GET",
             f"{self.endpoint.rstrip('/')}/resource_providers?uuid={provider_id}",
@@ -289,7 +303,7 @@ class PlacementInventoryManager:
             headers=headers,
             payload={
                 "resource_provider_generation": generation,
-                "inventories": {
+                "inventories": ({
                     resource_class: {
                         "total": total,
                         "reserved": 0,
@@ -298,7 +312,7 @@ class PlacementInventoryManager:
                         "step_size": 1,
                         "allocation_ratio": 1.0,
                     }
-                },
+                } if total else {}),
             },
         )
         generation = self._generation(provider_id)
@@ -311,12 +325,17 @@ class PlacementInventoryManager:
                 "traits": ["CUSTOM_FLYT_REMOTE_GPU", "MISC_SHARES_VIA_AGGREGATE"],
             },
         )
-        self._ensure_aggregate(provider_id, aggregate_uuid)
+        eligible_aggregates = {aggregate_uuid}
         for compute_provider_uuid in compute_provider_uuids:
             self._ensure_aggregate(compute_provider_uuid, aggregate_uuid)
+            eligible_aggregates.update(self._aggregate_ids(compute_provider_uuid))
+        self._ensure_aggregates(provider_id, eligible_aggregates)
         return provider_id
 
     def _ensure_aggregate(self, provider_id: str, aggregate_uuid: str) -> None:
+        self._ensure_aggregates(provider_id, {aggregate_uuid})
+
+    def _aggregate_ids(self, provider_id: str) -> set[str]:
         headers = self._headers("1.39")
         _, value = self.transport.request(
             "GET",
@@ -327,7 +346,20 @@ class PlacementInventoryManager:
         generation = value.get("resource_provider_generation")
         if not isinstance(aggregates, list) or not isinstance(generation, int):
             raise OpenStackError("Placement aggregate response is malformed")
-        desired = sorted({*aggregates, aggregate_uuid})
+        return set(aggregates)
+
+    def _ensure_aggregates(self, provider_id: str, required: set[str]) -> None:
+        headers = self._headers("1.39")
+        _, value = self.transport.request(
+            "GET",
+            f"{self.endpoint.rstrip('/')}/resource_providers/{provider_id}/aggregates",
+            headers=headers,
+        )
+        aggregates = value.get("aggregates", [])
+        generation = value.get("resource_provider_generation")
+        if not isinstance(aggregates, list) or not isinstance(generation, int):
+            raise OpenStackError("Placement aggregate response is malformed")
+        desired = sorted({*aggregates, *required})
         if desired != sorted(aggregates):
             self.transport.request(
                 "PUT",
@@ -363,6 +395,8 @@ def provider_uuid(profile: str) -> str:
 
 def _resource_class(profile: str) -> str:
     normalized = "".join(character if character.isalnum() else "_" for character in profile)
+    if normalized.upper().startswith("FLYT_"):
+        normalized = normalized[5:]
     return f"CUSTOM_FLYT_{normalized.upper()}"
 
 

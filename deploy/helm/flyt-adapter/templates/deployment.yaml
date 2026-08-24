@@ -9,15 +9,23 @@ metadata:
     {{- include "flyt-adapter.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  strategy: {type: Recreate}
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ include "flyt-adapter.name" . }}
       app.kubernetes.io/instance: {{ .Release.Name }}
   template:
     metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/openstack-token: {{ .Values.openstack.tokenGeneration | default "disabled" | quote }}
       labels:
         {{- include "flyt-adapter.labels" . | nindent 8 }}
     spec:
+      {{- if .Values.podNetwork.hostNetwork }}
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- end }}
       {{- if .Values.gpuCells.enabled }}
       serviceAccountName: {{ .Values.gpuCells.serviceAccountName }}
       {{- end }}
@@ -64,6 +72,9 @@ spec:
         - {name: config, mountPath: /etc/flyt-adapter, readOnly: true}
         - {name: state, mountPath: /var/lib/flyt-adapter}
         - {name: tmp, mountPath: /tmp}
+        {{- if .Values.openstack.caConfigMapName }}
+        - {name: openstack-ca, mountPath: /etc/flyt-openstack-ca, readOnly: true}
+        {{- end }}
         {{- if .Values.gpuCells.enabled }}
         - {name: kubernetes-api, mountPath: /var/run/secrets/flyt-kubernetes, readOnly: true}
         {{- end }}
@@ -99,6 +110,9 @@ spec:
         - {name: config, mountPath: /etc/flyt-adapter, readOnly: true}
         - {name: state, mountPath: /var/lib/flyt-adapter}
         - {name: tmp, mountPath: /tmp}
+        {{- if .Values.openstack.caConfigMapName }}
+        - {name: openstack-ca, mountPath: /etc/flyt-openstack-ca, readOnly: true}
+        {{- end }}
       {{- end }}
       {{- if .Values.reconciler.enabled }}
       {{- if not .Values.openstack.enabled }}{{ fail "reconciler requires openstack.enabled" }}{{ end }}
@@ -123,6 +137,15 @@ spec:
         - {name: config, mountPath: /etc/flyt-adapter, readOnly: true}
         - {name: state, mountPath: /var/lib/flyt-adapter}
         - {name: tmp, mountPath: /tmp}
+        {{- if .Values.openstack.caConfigMapName }}
+        - {name: openstack-ca, mountPath: /etc/flyt-openstack-ca, readOnly: true}
+        {{- end }}
+        {{- if .Values.gpuCells.enabled }}
+        - {name: kubernetes-api, mountPath: /var/run/secrets/flyt-kubernetes, readOnly: true}
+        {{- end }}
+        {{- if .Values.clusterManager.enabled }}
+        - {name: manager-socket, mountPath: /run/flyt}
+        {{- end }}
       {{- end }}
       {{- if .Values.clusterManager.enabled }}
       {{- $managerRepository := required "clusterManager.image.repository is required" .Values.clusterManager.image.repository }}
@@ -134,8 +157,22 @@ spec:
         env:
         - {name: FLYT_CLUSTER_MANAGER_CONFIG, value: /etc/flyt/cluster-manager.toml}
         ports:
-        - {name: flyt-node, containerPort: {{ .Values.clusterManager.nodePort }}}
-        - {name: flyt-client, containerPort: {{ .Values.clusterManager.clientPort }}}
+        - name: flyt-node
+          containerPort: {{ .Values.clusterManager.nodePort }}
+          {{- if .Values.clusterManager.hostPorts }}
+          hostPort: {{ .Values.clusterManager.nodePort }}
+          {{- with .Values.clusterManager.hostIP }}
+          hostIP: {{ . | quote }}
+          {{- end }}
+          {{- end }}
+        - name: flyt-client
+          containerPort: {{ .Values.clusterManager.clientPort }}
+          {{- if .Values.clusterManager.hostPorts }}
+          hostPort: {{ .Values.clusterManager.clientPort }}
+          {{- with .Values.clusterManager.hostIP }}
+          hostIP: {{ . | quote }}
+          {{- end }}
+          {{- end }}
         securityContext:
           allowPrivilegeEscalation: false
           capabilities: {drop: ["ALL"]}
@@ -156,11 +193,15 @@ spec:
         {{- end }}
       - name: tmp
         emptyDir: {}
+      {{- if .Values.openstack.caConfigMapName }}
+      - name: openstack-ca
+        configMap: {name: {{ .Values.openstack.caConfigMapName }}}
+      {{- end }}
       {{- if .Values.gpuCells.enabled }}
       - name: kubernetes-api
         projected:
           sources:
-          - serviceAccountToken: {path: token, expirationSeconds: 3600, audience: https://kubernetes.default.svc}
+          - serviceAccountToken: {path: token, expirationSeconds: 3600}
           - configMap: {name: kube-root-ca.crt, items: [{key: ca.crt, path: ca.crt}]}
       {{- end }}
       {{- if .Values.clusterManager.enabled }}

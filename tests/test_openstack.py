@@ -10,6 +10,7 @@ from flyt_adapter.openstack import (
     NovaInstanceStatusInventory,
     PlacementCapacityProvider,
     PlacementInventoryManager,
+    _resource_class,
     provider_uuid,
 )
 
@@ -29,13 +30,19 @@ class StubTransport:
 
 
 class OpenStackAdapterTest(unittest.TestCase):
+    def test_profile_prefix_is_not_duplicated_in_resource_class(self) -> None:
+        self.assertEqual(
+            "CUSTOM_FLYT_NVIDIA_RTX3090TI_MPS_SHARED_V1",
+            _resource_class("flyt-nvidia-rtx3090ti-mps-shared-v1"),
+        )
+
     def test_catalog_reads_authoritative_flavor_and_image(self) -> None:
         transport = StubTransport(responses=[
             (200, {"flavor": {
                 "id": "flavor-1",
                 "name": "flyt.small",
-                "extra_specs": {"flyt:enabled": "true", "flyt:profile": "gpu-small"},
             }}),
+            (200, {"extra_specs": {"flyt:enabled": "true", "flyt:profile": "gpu-small"}}),
             (200, {
                 "id": "image-1",
                 "os_hash_value": "sha512-value",
@@ -97,7 +104,6 @@ class OpenStackAdapterTest(unittest.TestCase):
         transport = StubTransport(responses=[
             (204, {}),
             (204, {}),
-            (204, {}),
             (200, {"resource_providers": []}),
             (200, {}),
             (200, {"generation": 0}),
@@ -112,7 +118,48 @@ class OpenStackAdapterTest(unittest.TestCase):
             profile=profile, total=0, aggregate_uuid=aggregate
         ))
         inventory_call = next(call for call in transport.calls if call[1].endswith("/inventories"))
-        self.assertEqual(0, inventory_call[3]["inventories"]["CUSTOM_FLYT_GPU_SMALL"]["total"])
+        self.assertEqual({}, inventory_call[3]["inventories"])
+        self.assertFalse(any(
+            method == "PUT" and url.endswith("/traits/MISC_SHARES_VIA_AGGREGATE")
+            for method, url, _, _ in transport.calls
+        ))
+
+    def test_inventory_manager_joins_remote_provider_to_compute_aggregates(self) -> None:
+        profile = "gpu-small"
+        provider_id = provider_uuid(profile)
+        compute_id = "22222222-2222-4222-8222-222222222222"
+        sharing_aggregate = "11111111-1111-4111-8111-111111111111"
+        rack_aggregate = "33333333-3333-4333-8333-333333333333"
+        transport = StubTransport(responses=[
+            (204, {}),
+            (204, {}),
+            (200, {"resource_providers": [{"uuid": provider_id}]}),
+            (200, {"generation": 0}),
+            (200, {}),
+            (200, {"generation": 1}),
+            (200, {}),
+            (200, {"aggregates": [rack_aggregate], "resource_provider_generation": 4}),
+            (200, {}),
+            (200, {"aggregates": [rack_aggregate, sharing_aggregate],
+                   "resource_provider_generation": 5}),
+            (200, {"aggregates": [sharing_aggregate], "resource_provider_generation": 2}),
+            (200, {}),
+        ])
+        manager = PlacementInventoryManager("https://placement", "token", transport)
+        manager.ensure_profile(
+            profile=profile,
+            total=2,
+            aggregate_uuid=sharing_aggregate,
+            compute_provider_uuids=(compute_id,),
+        )
+        provider_update = [
+            call for call in transport.calls
+            if call[0] == "PUT" and call[1].endswith(f"/{provider_id}/aggregates")
+        ][0]
+        self.assertEqual(
+            sorted([rack_aggregate, sharing_aggregate]),
+            provider_update[3]["aggregates"],
+        )
 
     def test_nova_inventory_normalizes_status(self) -> None:
         transport = StubTransport(responses=[(200, {"server": {"status": "active"}})])

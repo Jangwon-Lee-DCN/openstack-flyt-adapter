@@ -4,6 +4,7 @@
 {{- if .Values.gpuCells.enabled }}
 {{- $gpuDigest := required "gpuCells.image.digest is required" .Values.gpuCells.image.digest -}}
 {{- if not (hasPrefix "sha256:" $gpuDigest) }}{{ fail "gpuCells.image.digest must start with sha256:" }}{{ end }}
+{{- if not .Values.gpuCells.apiServerCidrs }}{{ fail "gpuCells.apiServerCidrs is required" }}{{ end }}
 {{- end }}
 apiVersion: v1
 kind: ConfigMap
@@ -25,7 +26,9 @@ data:
       "quotas": {{ .Values.config.quotas | toJson }},
       "service_network": {
         "networks": {{ .Values.config.serviceNetwork.networks | toJson }},
-        "security_group_ids": {{ .Values.config.serviceNetwork.securityGroupIds | toJson }}
+        "subnets": {{ .Values.config.serviceNetwork.subnets | toJson }},
+        "security_group_ids": {{ .Values.config.serviceNetwork.securityGroupIds | toJson }},
+        "endpoints": {{ .Values.config.serviceNetwork.endpoints | default dict | toJson }}
       },
       "openstack": {{- if .Values.openstack.enabled }} {
         "nova_endpoint": {{ required "openstack.novaEndpoint is required" .Values.openstack.novaEndpoint | quote }},
@@ -50,11 +53,14 @@ data:
         "image": {{ printf "%s@%s" (required "gpuCells.image.repository is required" .Values.gpuCells.image.repository) (required "gpuCells.image.digest is required" .Values.gpuCells.image.digest) | quote }},
         "cluster_manager_address": {{ required "gpuCells.clusterManagerAddress is required" .Values.gpuCells.clusterManagerAddress | quote }},
         "runtime_class_name": {{ .Values.gpuCells.runtimeClassName | quote }},
+        "host_network": {{ .Values.gpuCells.hostNetwork }},
         "session_profiles": {{ .Values.gpuCells.sessionProfiles | toJson }},
         "profiles": {{ .Values.gpuCells.profiles | toJson }}
       }{{- else }} null{{- end }},
       "client_package": {
         "url": {{ $packageURL | quote }},
-        "digest": {{ $packageDigest | quote }}
+        "digest": {{ $packageDigest | quote }},
+        "ca_file": {{ .Values.openstack.caFile | default "" | quote }},
+        "resolve_address": {{ .Values.config.clientPackage.resolveAddress | default "" | quote }}
       }
     }

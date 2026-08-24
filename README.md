@@ -106,6 +106,12 @@ shared Pod or release the whole-GPU claim. GPU Cell teardown is a separate
 pool-scoped operation. MIG remains an optional physical profile, not the
 default.
 
+Placement publication is fail-closed. Before a configured non-zero offering
+total is synchronized, the placement-sync mode verifies the configured DRA
+DeviceClass, at least one ResourceSlice device, and the exact expected product
+name. A missing API, driver, device, or model match publishes total `0` instead
+of advertising unusable capacity.
+
 The Nova downstream source is owned by `nova-extended-compute`; image packaging
 and OpenStack service configuration are owned by their respective platform
 repositories. Immutable Adapter, Cluster Manager,

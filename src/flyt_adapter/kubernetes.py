@@ -19,6 +19,12 @@ class KubernetesTransport(Protocol):
                 body: dict[str, Any] | None = None) -> tuple[int, dict[str, Any]]: ...
 
 
+@dataclass(frozen=True)
+class GpuCellReadiness:
+    ready: bool
+    reason: str
+
+
 @dataclass
 class UrllibKubernetesTransport:
     endpoint: str
@@ -68,6 +74,51 @@ class KubernetesGpuCellProvider:
     profiles: dict[str, GpuCellProfile]
     transport: KubernetesTransport
     runtime_class_name: str | None = None
+    host_network: bool = False
+
+    def readiness(self, cell_profile: str) -> GpuCellReadiness:
+        try:
+            profile = self.profiles[cell_profile]
+        except KeyError:
+            return GpuCellReadiness(False, f"unknown GPU Cell profile {cell_profile}")
+        try:
+            status, _ = self.transport.request(
+                "GET", f"/apis/resource.k8s.io/v1/deviceclasses/{quote(profile.device_class)}"
+            )
+            if status != 200:
+                return GpuCellReadiness(
+                    False, f"DeviceClass {profile.device_class} is unavailable (HTTP {status})"
+                )
+            status, slices = self.transport.request(
+                "GET", "/apis/resource.k8s.io/v1/resourceslices"
+            )
+            if status != 200:
+                return GpuCellReadiness(False, f"ResourceSlice list failed (HTTP {status})")
+        except Exception as exc:
+            return GpuCellReadiness(False, f"Kubernetes DRA discovery failed: {exc}")
+        devices = [
+            device
+            for item in slices.get("items", [])
+            if item.get("spec", {}).get("driver") == profile.device_class
+            for device in item.get("spec", {}).get("devices", [])
+        ]
+        if not devices:
+            return GpuCellReadiness(False, f"no devices published by {profile.device_class}")
+        if profile.expected_product_name:
+            products = {
+                value.get("string")
+                for device in devices
+                if isinstance((attributes := device.get("attributes", {})), dict)
+                if isinstance((value := (
+                    attributes.get("productName")
+                    or attributes.get(f"{profile.device_class}/productName")
+                )), dict)
+            }
+            if profile.expected_product_name not in products:
+                return GpuCellReadiness(
+                    False, f"expected GPU product {profile.expected_product_name} is not published"
+                )
+        return GpuCellReadiness(True, "DRA device is available")
 
     def ensure(self, *, cell_profile: str) -> GpuCell:
         cell_name = _resource_name("flyt-cell", cell_profile)
@@ -183,6 +234,9 @@ class KubernetesGpuCellProvider:
         }
         if self.runtime_class_name:
             spec["runtimeClassName"] = self.runtime_class_name
+        if self.host_network:
+            spec["hostNetwork"] = True
+            spec["dnsPolicy"] = "ClusterFirstWithHostNet"
         return {
             "apiVersion": "v1", "kind": "Pod",
             "metadata": {"name": name, "namespace": self.namespace, "labels": {
