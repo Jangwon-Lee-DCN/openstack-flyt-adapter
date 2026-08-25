@@ -53,7 +53,7 @@ class ServicePortTest(unittest.TestCase):
         transport = RecordingTransport()
         provider = NeutronServicePortProvider(
             "https://neutron.invalid", "token", transport,
-            {"az1": "network-1"}, ("sg-1",),
+            {"az1": "network-1"}, {"az1": "subnet-1"}, ("sg-1",),
         )
         value = provider.ensure(
             instance_uuid="vm-1", project_id="project-1", availability_zone="az1"
@@ -62,8 +62,11 @@ class ServicePortTest(unittest.TestCase):
         self.assertEqual("172.30.1.10", value.service_ip)
         self.assertEqual((value,), provider.list_managed())
         create = next(call for call in transport.calls if call[0] == "POST")
-        self.assertEqual("compute:flyt", create[3]["port"]["device_owner"])
+        self.assertEqual("", create[3]["port"]["device_owner"])
+        self.assertEqual("", create[3]["port"]["device_id"])
+        self.assertIn("instance-uuid=vm-1", create[3]["port"]["tags"])
         self.assertEqual(["sg-1"], create[3]["port"]["security_groups"])
+        self.assertEqual([{"subnet_id": "subnet-1"}], create[3]["port"]["fixed_ips"])
         self.assertEqual(value, provider.ensure(
             instance_uuid="vm-1", project_id="project-1", availability_zone="az1"
         ))

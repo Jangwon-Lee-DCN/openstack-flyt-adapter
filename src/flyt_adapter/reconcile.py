@@ -46,7 +46,8 @@ class SessionReconciler:
                 self.lifecycle.delete_instance(record.instance_uuid)
                 deleted += 1
             elif status == "ACTIVE" and record.state in {
-                SessionState.RESERVED, SessionState.STARTING
+                SessionState.RESERVED, SessionState.STARTING,
+                SessionState.PENDING_CAPACITY,
             }:
                 self.lifecycle.instance_active(record.instance_uuid)
                 started += 1

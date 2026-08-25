@@ -45,6 +45,9 @@ spec:
   - metadata: {name: data}
     spec:
       accessModes: ["ReadWriteOnce"]
+      {{- with .Values.clusterManager.mongodb.storageClassName }}
+      storageClassName: {{ . | quote }}
+      {{- end }}
       resources:
         requests: {storage: {{ .Values.clusterManager.mongodb.storageSize }}}
 ---
@@ -63,5 +66,24 @@ spec:
         matchLabels:
           app.kubernetes.io/name: {{ include "flyt-adapter.name" . }}
           app.kubernetes.io/instance: {{ .Release.Name }}
+    {{- range .Values.clusterManager.mongodb.clientCidrs }}
+    - ipBlock: {cidr: {{ . | quote }}}
+    {{- end }}
     ports: [{protocol: TCP, port: 27017}]
+{{- end }}
+{{- if .Values.clusterManager.mongodb.allowCiliumHost }}
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "flyt-adapter.name" $ }}-mongodb-host-manager
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "flyt-adapter.name" $ }}-mongodb
+  ingress:
+  - fromEntities: [host]
+    toPorts:
+    - ports:
+      - {port: "27017", protocol: TCP}
 {{- end }}

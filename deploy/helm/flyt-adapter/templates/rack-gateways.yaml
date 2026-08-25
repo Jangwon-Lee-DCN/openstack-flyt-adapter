@@ -1,0 +1,35 @@
+{{- range .Values.rackGateways }}
+{{- $repository := required "rackGateways[].image.repository is required" .image.repository }}
+{{- $digest := required "rackGateways[].image.digest is required" .image.digest }}
+{{- $listenIP := required "rackGateways[].listenIP is required" .listenIP }}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ printf "%s-rack-gateway-%s" (include "flyt-adapter.name" $) .name }}
+spec:
+  selector:
+    matchLabels: {app.kubernetes.io/name: flyt-adapter-rack-gateway, app.kubernetes.io/instance: {{ $.Release.Name }}, flyt.dcn.ssu.ac.kr/rack: {{ .name | quote }}}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: flyt-adapter-rack-gateway, app.kubernetes.io/instance: {{ $.Release.Name }}, flyt.dcn.ssu.ac.kr/rack: {{ .name | quote }}}
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/hostname: {{ .node | quote }}
+      containers:
+      - name: node-gateway
+        image: {{ printf "%s@%s" $repository $digest | quote }}
+        args: ["--mode", "gateway", "--listen-host", {{ $listenIP | quote }}, "--listen-port", {{ $.Values.clusterManager.nodePort | quote }}, "--backend-host", "flyt-adapter-manager", "--backend-port", {{ $.Values.clusterManager.nodePort | quote }}]
+        securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: ["ALL"]}, readOnlyRootFilesystem: true}
+      - name: client-gateway
+        image: {{ printf "%s@%s" $repository $digest | quote }}
+        args: ["--mode", "gateway", "--listen-host", {{ $listenIP | quote }}, "--listen-port", {{ $.Values.clusterManager.clientPort | quote }}, "--backend-host", "flyt-adapter-manager", "--backend-port", {{ $.Values.clusterManager.clientPort | quote }}]
+        securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: ["ALL"]}, readOnlyRootFilesystem: true}
+      - name: package-gateway
+        image: {{ printf "%s@%s" $repository $digest | quote }}
+        args: ["--mode", "gateway", "--listen-host", {{ $listenIP | quote }}, "--listen-port", {{ .packageProxy.listenPort | quote }}, "--backend-host", {{ required "rackGateways[].packageProxy.backendHost is required" .packageProxy.backendHost | quote }}, "--backend-port", {{ .packageProxy.backendPort | quote }}]
+        securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: ["ALL"]}, readOnlyRootFilesystem: true}
+{{- end }}

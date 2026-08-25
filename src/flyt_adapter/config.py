@@ -25,7 +25,9 @@ class OpenStackConfig:
 @dataclass(frozen=True)
 class ServiceNetworkConfig:
     networks: dict[str, str]
+    subnets: dict[str, str]
     security_group_ids: tuple[str, ...]
+    endpoints: dict[str, str]
 
 
 @dataclass(frozen=True)
@@ -49,6 +51,7 @@ class KubernetesGpuCellsConfig:
     image: str
     cluster_manager_address: str
     runtime_class_name: str | None
+    host_network: bool
     session_profiles: dict[str, str]
     profiles: dict[str, dict[str, Any]]
 
@@ -135,6 +138,18 @@ class ServiceConfig:
             isinstance(value, str) and value for value in security_groups
         ):
             raise ValueError("service_network.security_group_ids must be a string list")
+        subnets = network_raw.get("subnets", {})
+        if not isinstance(subnets, dict) or not all(
+            isinstance(key, str) and key in networks and isinstance(value, str) and value
+            for key, value in subnets.items()
+        ):
+            raise ValueError("service_network.subnets must map known AZs to subnet IDs")
+        endpoints = network_raw.get("endpoints", {})
+        if not isinstance(endpoints, dict) or not all(
+            isinstance(key, str) and key in networks and isinstance(value, str) and value
+            for key, value in endpoints.items()
+        ):
+            raise ValueError("service_network.endpoints must map known AZs to IP addresses")
         manager = None
         manager_raw = raw.get("flyt_manager")
         if manager_raw is not None:
@@ -211,6 +226,9 @@ class ServiceConfig:
             runtime_class = gpu_cells_raw.get("runtime_class_name")
             if runtime_class is not None and not isinstance(runtime_class, str):
                 raise ValueError("runtime_class_name must be a string")
+            host_network = gpu_cells_raw.get("host_network", False)
+            if not isinstance(host_network, bool):
+                raise ValueError("host_network must be a boolean")
             gpu_cells = KubernetesGpuCellsConfig(
                 endpoint=_nonempty(gpu_cells_raw, "endpoint"),
                 namespace=_nonempty(gpu_cells_raw, "namespace"),
@@ -219,6 +237,7 @@ class ServiceConfig:
                 image=image,
                 cluster_manager_address=_nonempty(gpu_cells_raw, "cluster_manager_address"),
                 runtime_class_name=runtime_class,
+                host_network=host_network,
                 session_profiles=dict(session_profiles),
                 profiles=profiles,
             )
@@ -250,10 +269,19 @@ class ServiceConfig:
             client_package=ClientPackage(
                 url=_nonempty(package, "url"),
                 digest=_nonempty(package, "digest"),
+                ca_certificate=(
+                    Path(str(package["ca_file"])).read_text()
+                    if package.get("ca_file") else None
+                ),
+                resolve_address=(
+                    str(package["resolve_address"])
+                    if package.get("resolve_address") else None
+                ),
             ),
             openstack=openstack,
             service_network=ServiceNetworkConfig(
-                networks=dict(networks), security_group_ids=tuple(security_groups)
+                networks=dict(networks), subnets=dict(subnets),
+                security_group_ids=tuple(security_groups), endpoints=dict(endpoints)
             ),
             notification_transport_url=(
                 os.environ.get("FLYT_NOTIFICATION_TRANSPORT_URL") or

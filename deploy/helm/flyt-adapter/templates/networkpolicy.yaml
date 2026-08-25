@@ -13,6 +13,9 @@ spec:
   ingress:
   - from:
     - podSelector: {}
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: openstack
     ports:
     - {protocol: TCP, port: {{ .Values.service.port }}}
   {{- if .Values.clusterManager.enabled }}
@@ -39,6 +42,10 @@ spec:
     ports:
     - {protocol: TCP, port: 443}
     - {protocol: TCP, port: 80}
+    - {protocol: TCP, port: 8774}
+    - {protocol: TCP, port: 8778}
+    - {protocol: TCP, port: 9292}
+    - {protocol: TCP, port: 9696}
     {{- if .Values.notifications.enabled }}
     - {protocol: TCP, port: 5672}
     {{- end }}
@@ -57,3 +64,56 @@ spec:
     ports:
     - {protocol: TCP, port: 27017}
   {{- end }}
+  {{- if .Values.gpuCells.enabled }}
+  - to:
+    {{- range .Values.gpuCells.apiServerCidrs }}
+    - ipBlock: {cidr: {{ . | quote }}}
+    {{- end }}
+    ports:
+    {{- range .Values.gpuCells.apiServerPorts }}
+    - {protocol: TCP, port: {{ . }}}
+    {{- end }}
+{{- end }}
+{{- if .Values.gpuCells.enabled }}
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "flyt-adapter.name" . }}-kube-api
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "flyt-adapter.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  egress:
+  - toEntities: [kube-apiserver]
+    toPorts:
+    - ports:
+      {{- range .Values.gpuCells.apiServerPorts }}
+      - {port: {{ . | quote }}, protocol: TCP}
+      {{- end }}
+{{- end }}
+{{- if .Values.rackGateway.enabled }}
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "flyt-adapter.name" . }}-rack-gateway
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "flyt-adapter.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  ingress:
+  - fromEntities: [host, remote-node]
+    toPorts:
+    - ports:
+      # Nova compute builds config-drive metadata from host-networked Pods.
+      # Limit those node identities to the authenticated Adapter HTTP port.
+      - {port: {{ .Values.service.port | quote }}, protocol: TCP}
+      - {port: {{ .Values.clusterManager.nodePort | quote }}, protocol: TCP}
+      - {port: {{ .Values.clusterManager.clientPort | quote }}, protocol: TCP}
+      {{- if .Values.rackGateway.packageProxy.enabled }}
+      - {port: {{ .Values.rackGateway.packageProxy.listenPort | quote }}, protocol: TCP}
+      {{- end }}
+{{- end }}

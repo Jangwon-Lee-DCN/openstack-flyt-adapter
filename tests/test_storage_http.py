@@ -8,6 +8,7 @@ import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import Mock
 
 from flyt_adapter.config import ServiceConfig
 from flyt_adapter.http import Application, make_handler
@@ -38,6 +39,12 @@ class StorageAndHttpTest(unittest.TestCase):
             "client_package": {
                 "url": "https://packages.example.invalid/flyt-client.pkg",
                 "digest": "sha256:" + "a" * 64,
+            },
+            "service_network": {
+                "networks": {"default": "fake-flyt-network"},
+                "subnets": {},
+                "security_group_ids": [],
+                "endpoints": {"default": "192.0.2.44"},
             },
         }))
         self.config = ServiceConfig.load(self.config_path)
@@ -89,7 +96,9 @@ class StorageAndHttpTest(unittest.TestCase):
         )
         self.assertEqual(200, status)
         self.assertEqual("text/cloud-config", content_type)
-        self.assertIn("#cloud-config", cloud_config)
+        self.assertTrue(cloud_config.startswith("#!/bin/sh"))
+        self.assertIn("--resolve packages.example.invalid:443:192.0.2.44", cloud_config)
+        self.assertIn("tcp://192.0.2.44:12402", cloud_config)
         status, repeated, _ = self.app.handle(
             "POST", "/v1/vendor-data/instance-1", None
         )
@@ -113,10 +122,6 @@ class StorageAndHttpTest(unittest.TestCase):
 
     def test_nova_dynamic_vendor_data_contract(self) -> None:
         self.app.handle("POST", "/v1/admissions", self.admission_body())
-        self.app.handle("POST", "/v1/events", {
-            "event_type": "instance.create.end",
-            "payload": {"instance_uuid": "instance-1"},
-        })
         body = {
             "project-id": "project-1",
             "instance-id": "instance-1",
@@ -131,7 +136,15 @@ class StorageAndHttpTest(unittest.TestCase):
         self.assertEqual(200, first[0])
         self.assertEqual("application/json", first[2])
         self.assertEqual(first[1], second[1])
-        self.assertTrue(first[1].startswith("#cloud-config"))
+        self.assertTrue(first[1].startswith("#!/bin/sh"))
+        self.assertEqual(SessionState.READY, self.app.lifecycle.sessions["instance-1"].state)
+
+        status, reconciled, _ = self.app.handle("POST", "/v1/events", {
+            "event_type": "instance.create.end",
+            "payload": {"instance_uuid": "instance-1"},
+        })
+        self.assertEqual(200, status)
+        self.assertEqual("READY", reconciled["state"])
 
         non_flyt = dict(body, **{"instance-id": "ordinary-instance"})
         self.assertEqual(
@@ -164,20 +177,32 @@ class StorageAndHttpTest(unittest.TestCase):
     def test_prebuild_creates_managed_port_and_error_event_rolls_it_back(self) -> None:
         body = self.admission_body()
         body["availability_zone"] = "default"
-        status, value, _ = self.app.handle("POST", "/v1/prebuild", body)
-        self.assertEqual(201, status)
-        self.assertEqual("fake-flyt-network", value["port"]["network_id"])
-        self.assertIsNotNone(self.app.service_ports.get("instance-1"))
         with self.assertRaisesRegex(Exception, "no FLYT service network"):
             rejected = self.admission_body()
             rejected["instance_uuid"] = "instance-az2"
             rejected["availability_zone"] = "az2"
             self.app.handle("POST", "/v1/prebuild", rejected)
+        status, value, _ = self.app.handle("POST", "/v1/prebuild", body)
+        self.assertEqual(201, status)
+        self.assertEqual("fake-flyt-network", value["port"]["network_id"])
+        self.assertIn(value["session"]["state"], {"RESERVED", "PENDING_CAPACITY"})
+        self.assertIn("instance-1", self.app.lifecycle.sessions)
+        self.assertIsNotNone(self.app.service_ports.get("instance-1"))
         self.app.handle("POST", "/v1/events", {
             "event_type": "instance.create.error",
             "payload": {"instance_uuid": "instance-1", "exception": "build failed"},
         })
         self.assertIsNone(self.app.service_ports.get("instance-1"))
+
+    def test_prebuild_uses_authenticated_nova_payload_without_catalog_reentry(self) -> None:
+        body = self.admission_body()
+        body["availability_zone"] = "default"
+        self.app.catalog = Mock()
+        self.app.catalog.flavor.side_effect = AssertionError("recursive Nova lookup")
+        self.app.catalog.image.side_effect = AssertionError("recursive Glance lookup")
+        status, value, _ = self.app.handle("POST", "/v1/prebuild", body)
+        self.assertEqual(201, status)
+        self.assertEqual("gpu-small", value["profile"])
 
     def test_explicit_prebuild_rollback_is_idempotent(self) -> None:
         body = self.admission_body()
@@ -188,6 +213,10 @@ class StorageAndHttpTest(unittest.TestCase):
         self.assertEqual(
             204,
             self.app.handle("DELETE", "/v1/prebuild/instance-rollback", None)[0],
+        )
+        self.assertEqual(
+            SessionState.FAILED,
+            self.app.lifecycle.sessions["instance-rollback"].state,
         )
         self.assertEqual(
             204,

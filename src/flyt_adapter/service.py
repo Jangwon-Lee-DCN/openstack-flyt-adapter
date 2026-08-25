@@ -54,11 +54,50 @@ class FlytLifecycleService:
         return profile
 
     @_synchronized
+    def prepare_build(self, request: InstanceRequest) -> SessionRecord:
+        """Reserve quota before scheduling without requiring a Placement allocation."""
+
+        existing = self.sessions.get(request.instance_uuid)
+        if existing and existing.state != SessionState.DELETED:
+            return existing
+        profile = self.preflight(request)
+        try:
+            self.quotas.reserve(
+                project_id=request.project_id,
+                profile=profile,
+                consumer_uuid=request.instance_uuid,
+            )
+        except QuotaExceededError as exc:
+            raise AdmissionError(str(exc)) from exc
+        record = SessionRecord(
+            instance_uuid=request.instance_uuid,
+            project_id=request.project_id,
+            profile=profile,
+            reservation_id=f"pending-placement:{request.instance_uuid}",
+            port_id=request.service_port.port_id if request.service_port else None,
+            service_ip=request.service_port.service_ip if request.service_port else None,
+            generation=(existing.generation + 1 if existing else 1),
+        )
+        self.sessions[request.instance_uuid] = record
+        return record
+
+    @_synchronized
     def admit_build(self, request: InstanceRequest) -> SessionRecord:
         """Validate and reserve before Nova starts building the VM."""
 
         existing = self.sessions.get(request.instance_uuid)
         if existing and existing.state != SessionState.DELETED:
+            if existing.reservation_id.startswith("pending-placement:"):
+                try:
+                    existing.reservation_id = self.capacity.reserve(
+                        profile=existing.profile,
+                        consumer_uuid=existing.instance_uuid,
+                        project_id=existing.project_id,
+                        user_id=request.user_id,
+                    )
+                except NoCapacityError as exc:
+                    raise AdmissionError(str(exc)) from exc
+                self.sessions[existing.instance_uuid] = existing
             return existing
         profile = self._validate_request(request)
         try:
@@ -88,6 +127,25 @@ class FlytLifecycleService:
             generation=(existing.generation + 1 if existing else 1),
         )
         self.sessions[request.instance_uuid] = record
+        return record
+
+    @_synchronized
+    def finalize_scheduled_build(self, instance_uuid: str) -> SessionRecord:
+        """Verify Nova's Placement claim before config-drive materialization."""
+
+        record = self._record(instance_uuid)
+        if not record.reservation_id.startswith("pending-placement:"):
+            return record
+        try:
+            record.reservation_id = self.capacity.reserve(
+                profile=record.profile,
+                consumer_uuid=record.instance_uuid,
+                project_id=record.project_id,
+                user_id="nova-scheduled-consumer",
+            )
+        except NoCapacityError as exc:
+            raise AdmissionError(str(exc)) from exc
+        self.sessions[instance_uuid] = record
         return record
 
     @_synchronized
