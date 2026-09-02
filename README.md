@@ -1,11 +1,12 @@
 # OpenStack FLYT Adapter
 
-Control plane for presenting remote FLYT GPU capacity behind a DCN accelerator
-profile. Users select a base compute Flavor and a delivery profile separately.
-The private Nova implementation Flavor carries `flyt:enabled` and the immutable
-`flyt:profile` scheduling identity; neither its display name nor the public
-profile ID contains a physical GPU model. PCI passthrough implementations must
-not carry `flyt:enabled`.
+Control plane for presenting remote FLYT GPU capacity as a DCN accelerated
+instance family. Users select one atomic instance type such as `f1.xlarge`;
+they do not combine a base compute Flavor with a second accelerator selector.
+The Nova Flavor carries `flyt:enabled` and the immutable `flyt:profile`
+scheduling identity. The family generation, rather than a GPU model string in
+the name, identifies a stable delivery and hardware guarantee. PCI passthrough
+instance families must not carry `flyt:enabled`.
 It is intentionally runnable with zero GPU inventory so the OpenStack contract
 can be completed before GPU workers arrive.
 
@@ -95,9 +96,10 @@ backend with physical profile `nvidia-rtx3090ti-whole-mps`,
 Ti. The Adapter directly creates one whole-GPU ResourceClaim and one
 long-lived GPU Cell Pod for that physical cell profile. Internal offerings such
 as `flyt-nvidia-rtx3090ti-mps-shared-v1` map to that Cell, and FLYT CUDA MPS
-shares it among VM sessions. The user-visible accelerator profile is
-model-neutral (for example `gpu.shared.v1`); the stable internal `flyt:profile`
-extra spec remains the scheduling and quota identity.
+shares it among VM sessions. A user-visible type such as `f1.xlarge` binds to
+that immutable FLYT service class; the stable internal `flyt:profile` extra
+spec remains the scheduling and quota identity. A materially different GPU or
+delivery guarantee requires a new family generation instead of changing `f1`.
 Deleting a VM drains only its Cluster Manager session; it does not delete the
 shared Pod or release the whole-GPU claim. GPU Cell teardown is a separate
 pool-scoped operation. MIG remains an optional physical profile, not the
