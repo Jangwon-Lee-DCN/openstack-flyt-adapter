@@ -1,14 +1,12 @@
 # OpenStack FLYT Adapter
 
-Control plane for presenting remote FLYT GPU capacity as an OpenStack Flavor.
-
-Flavor display names follow
-`gpu.<delivery>.<vendor>.<device-or-family>.<partition>.<size>`. For example,
-`gpu.passthrough.nvidia.rtx3090ti.whole` is a Nova PCI passthrough product and
-must not carry `flyt:enabled`; `gpu.remote.nvidia.rtx3090ti.mps.shared` is the
-initial non-guaranteed FLYT remote-GPU development product. The immutable
-`flyt:profile` offering ID remains the
-scheduling identity even if an operator renames the display name.
+Control plane for presenting remote FLYT GPU capacity as a DCN accelerated
+instance family. Users select one atomic instance type such as `f1.xlarge`;
+they do not combine a base compute Flavor with a second accelerator selector.
+The Nova Flavor carries `flyt:enabled` and the immutable `flyt:profile`
+scheduling identity. The family generation, rather than a GPU model string in
+the name, identifies a stable delivery and hardware guarantee. PCI passthrough
+instance families must not carry `flyt:enabled`.
 It is intentionally runnable with zero GPU inventory so the OpenStack contract
 can be completed before GPU workers arrive.
 
@@ -96,11 +94,12 @@ For a non-MIG GPU such as an RTX 3090 Ti, enable the Kubernetes GPU Cell
 backend with physical profile `nvidia-rtx3090ti-whole-mps`,
 `device_class: gpu.nvidia.com`, and a DRA `productName` selector for RTX 3090
 Ti. The Adapter directly creates one whole-GPU ResourceClaim and one
-long-lived GPU Cell Pod for that physical cell profile. Logical profiles such
-as `flyt-nvidia-rtx3090ti-mps-shared-v1` map to that Cell, and FLYT CUDA MPS shares it
-among VM sessions. A recommended user-visible Flavor name is
-`gpu.remote.nvidia.rtx3090ti.mps.shared`; the stable `flyt:profile` extra spec,
-not the display name, is the scheduling and quota identity.
+long-lived GPU Cell Pod for that physical cell profile. Internal offerings such
+as `flyt-nvidia-rtx3090ti-mps-shared-v1` map to that Cell, and FLYT CUDA MPS
+shares it among VM sessions. A user-visible type such as `f1.xlarge` binds to
+that immutable FLYT service class; the stable internal `flyt:profile` extra
+spec remains the scheduling and quota identity. A materially different GPU or
+delivery guarantee requires a new family generation instead of changing `f1`.
 Deleting a VM drains only its Cluster Manager session; it does not delete the
 shared Pod or release the whole-GPU claim. GPU Cell teardown is a separate
 pool-scoped operation. MIG remains an optional physical profile, not the
